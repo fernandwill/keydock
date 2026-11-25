@@ -32,6 +32,8 @@ fn run() -> Result<(), Box<dyn Error>> {
             unsafe { PostQuitMessage(0) };
         }
     }));
+    // Without a handler, tray-icon queues pointer events that keydock never reads.
+    tray_icon::TrayIconEvent::set_event_handler(Some(|_| {}));
     let _tray = TrayIconBuilder::new()
         .with_tooltip("keydock: inactive")
         .with_icon(keyboard_icon()?)
