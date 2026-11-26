@@ -73,6 +73,14 @@ A user must never be left with no working keyboard.
 - An `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value. Per-user, no admin rights.
 - A **Start at login** checkbox in the tray menu adds or removes the value.
 
+## Updates
+
+- Notify only: keydock never downloads or replaces its own files, so it needs no update signature. If install-on-click is added later, sign each release with Ed25519 and embed the public key.
+- A background thread asks `api.github.com` for the latest release 60 seconds after startup, then every 24 hours. The delay keeps startup, and the short-lived keydocks in the desktop check, free of network requests. GitHub allows 60 unauthenticated requests per hour per address.
+- The release tag must be `vMAJOR.MINOR.PATCH`; keydock compares it with its own `Cargo.toml` version as numbers. HTTP 404 means no release yet and counts as up to date.
+- A newer release adds an **Update available** item at the top of the tray menu and a note in the tooltip. A failed check adds a disabled item with the reason, so the failure is visible without a dialog.
+- The repository comes from the `repository` field in `Cargo.toml`; a unit test checks it points at GitHub.
+
 ## Release
 
 - A portable zip attached to GitHub Releases: `keydock.exe`, the bundled Interception files, `NOTICE.txt`, and the LGPL and GPL texts.

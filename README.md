@@ -12,6 +12,10 @@ cargo run
 
 Look for the keyboard icon in the Windows notification area (check hidden icons if necessary). Hover over it to see `keydock: inactive`. Right-click and choose **Quit** to exit. There is no application window. Only one keydock runs per Windows session: if keydock is already running, a second start exits at once with no message.
 
+## Update notice
+
+About 60 seconds after it starts, and then every 24 hours, keydock asks GitHub for the latest release of this repository (`api.github.com/repos/<owner>/keydock/releases/latest`, User-Agent `keydock/<version>`). It sends nothing else. If the release is newer than the running version, the tray menu shows **Update available: vX.Y.Z**, which opens the release page, and the tooltip says so too. If the check fails, the menu shows a disabled **Update check failed** item with the reason. keydock never downloads or installs anything itself.
+
 ## Check the Quit action
 
 On an unlocked Windows desktop with Explorer running and Python 3.8 or newer installed, run:
