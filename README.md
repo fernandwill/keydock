@@ -21,7 +21,7 @@ cargo build --locked
 python tests/tray_quit.py target/debug/keydock.exe
 ```
 
-The check also starts a second keydock and expects it to exit. Then it opens a native menu for its own keydock process. Leave the menu alone until the check finishes. This desktop check is separate from `cargo test`.
+Quit any running keydock first. The check holds a lock that keydock cannot open, as an elevated keydock's lock would be, and expects keydock to exit. It also starts a second keydock and expects it to exit. Then it opens a native menu for its own keydock process. Leave the menu alone until the check finishes. This desktop check is separate from `cargo test`.
 
 ## Driver
 

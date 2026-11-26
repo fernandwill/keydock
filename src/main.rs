@@ -10,7 +10,7 @@ use tray_icon::{
 };
 use windows::{
     Win32::{
-        Foundation::{ERROR_ALREADY_EXISTS, GetLastError},
+        Foundation::{ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, GetLastError},
         System::Threading::CreateMutexW,
         UI::WindowsAndMessaging::{
             DispatchMessageW, GetMessageW, MB_ICONERROR, MSG, MessageBoxW, PostQuitMessage,
@@ -31,10 +31,16 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), Box<dyn Error>> {
     // The handle stays open until the process exits; that is what holds the single-instance lock.
-    let _instance = unsafe { CreateMutexW(None, false, w!(r"Local\keydock")) }?;
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+    let instance = unsafe { CreateMutexW(None, false, w!(r"Local\keydock")) };
+    let already_running = match &instance {
+        Ok(_) => unsafe { GetLastError() == ERROR_ALREADY_EXISTS },
+        // An elevated keydock's lock denies access to a normal start.
+        Err(error) => error.code() == ERROR_ACCESS_DENIED.to_hresult(),
+    };
+    if already_running {
         return Ok(());
     }
+    let _instance = instance?;
     let quit = MenuItem::new("Quit", true, None);
     let menu = Menu::with_items(&[&quit])?;
     let quit_id = quit.id().clone();

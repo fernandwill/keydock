@@ -8,6 +8,9 @@ import sys
 import time
 
 user32 = c.WinDLL("user32", use_last_error=True)
+kernel32 = c.WinDLL("kernel32", use_last_error=True)
+advapi32 = c.WinDLL("advapi32", use_last_error=True)
+kernel32.CreateMutexW.restype = w.HANDLE
 TIMEOUT = 5
 # tray-icon 0.26 uses this private window class and shell callback message.
 TRAY_CLASS = "tray_icon_app"
@@ -17,6 +20,13 @@ WM_KEYDOWN = 0x0100
 MN_GETHMENU = 0x01E1
 MF_BYPOSITION = 0x0400
 VK_DOWN, VK_RETURN = 0x28, 0x0D
+MUTEX_NAME = r"Local\keydock"
+ERROR_ALREADY_EXISTS = 183
+SDDL_REVISION_1 = 1
+
+
+class SECURITY_ATTRIBUTES(c.Structure):
+    _fields_ = [("nLength", w.DWORD), ("lpSecurityDescriptor", w.LPVOID), ("bInheritHandle", w.BOOL)]
 
 
 def window(process, class_name):
@@ -39,22 +49,44 @@ def post(hwnd, message, key, data):
         raise c.WinError(c.get_last_error())
 
 
-def check_second_instance_exits(binary):
-    second = subprocess.Popen([binary])
+def check_exits_quietly(binary, situation):
+    process = subprocess.Popen([binary])
     try:
-        if second.wait(timeout=TIMEOUT) != 0:
-            raise RuntimeError(f"Second keydock returned exit code {second.returncode}")
+        if process.wait(timeout=TIMEOUT) != 0:
+            raise RuntimeError(f"keydock returned exit code {process.returncode} {situation}")
     except subprocess.TimeoutExpired:
-        second.kill()
-        second.wait(timeout=TIMEOUT)
-        raise RuntimeError("A second keydock kept running next to the first") from None
+        process.kill()
+        process.wait(timeout=TIMEOUT)
+        raise RuntimeError(f"keydock kept running {situation}") from None
+
+
+def check_unopenable_lock_exits(binary):
+    # An empty DACL stands in for an elevated keydock's lock, which a normal process cannot open.
+    descriptor = w.LPVOID()
+    if not advapi32.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+        "D:", SDDL_REVISION_1, c.byref(descriptor), None
+    ):
+        raise c.WinError(c.get_last_error())
+    attributes = SECURITY_ATTRIBUTES(c.sizeof(SECURITY_ATTRIBUTES), descriptor, False)
+    c.set_last_error(0)
+    mutex = kernel32.CreateMutexW(c.byref(attributes), False, MUTEX_NAME)
+    error = c.get_last_error()
+    kernel32.LocalFree(descriptor)
+    if not mutex:
+        raise c.WinError(error)
+    try:
+        if error == ERROR_ALREADY_EXISTS:
+            raise RuntimeError("Another keydock is running; quit it before this check")
+        check_exits_quietly(binary, "when it cannot open another instance's lock")
+    finally:
+        kernel32.CloseHandle(mutex)
 
 
 def check_quit(binary):
     process = subprocess.Popen([binary])
     try:
         tray = window(process, TRAY_CLASS)
-        check_second_instance_exits(binary)
+        check_exits_quietly(binary, "next to the first")
         post(tray, TRAY_CALLBACK, 0, WM_RBUTTONUP)
         popup = window(process, "#32768")
         menu = c.c_size_t()
@@ -75,5 +107,10 @@ def check_quit(binary):
 
 
 if __name__ == "__main__":
-    check_quit(Path(sys.argv[1]).resolve())
-    print("PASS: a second keydock exited, the native menu opened, and Quit exited with status 0.")
+    binary = Path(sys.argv[1]).resolve()
+    check_unopenable_lock_exits(binary)
+    check_quit(binary)
+    print(
+        "PASS: keydock exited quietly when the lock was taken or could not be opened,"
+        " the native menu opened, and Quit exited with status 0."
+    )
