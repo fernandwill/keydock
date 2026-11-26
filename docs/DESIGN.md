@@ -45,7 +45,12 @@ If the driver is missing at startup, keydock stays inactive and shows an error t
 
 ### Connect and disconnect
 
-- keydock listens for keyboard arrival and removal (`RegisterDeviceNotification` with `GUID_DEVINTERFACE_KEYBOARD`).
+- keydock listens for keyboard arrival and removal (`CM_Register_Notification` with `GUID_DEVINTERFACE_KEYBOARD`).
+- Windows' device list (SetupAPI) decides which keyboards are present. The driver's list only supplies the device numbers to block: it lags arrivals and removals, and it stops listing new keyboards once its slots run out.
+- The driver drops all input from a keyboard without a slot. So an allowlisted keyboard triggers the block only if every one of its interfaces has a slot; otherwise the menu says so and the built-in keyboard stays on. Without this rule, a keyboard without a slot locked the user out (seen on the development laptop).
+- After each report keydock scans again every 250 ms for 5 s, because the driver's list lags the report (under 2 s on the development laptop).
+- An arrival report for an allowlisted keyboard ends **Re-enable until next connect**, even if no scan saw the keyboard leave.
+- If a rescan fails, keydock stops blocking until the next keyboard change.
 - The built-in keyboard stays blocked while at least one allowlisted keyboard is connected. keydock restores it when the last one disconnects.
 
 ## Failsafe
@@ -105,5 +110,6 @@ These are facts to verify during the build, not open decisions:
 - Does the Interception client need admin rights? Autostart through the Run key assumes it does not. If it does, autostart needs a Task Scheduler task instead.
   - Answered: no. A non-elevated keydock reads every hardware ID and blocks keys (`src/interception.rs`).
 - Is the reported 10-device-slot exhaustion after many hot-plug cycles still present? If yes, document it in the README.
+  - Answered: yes. After three Keychron reconnects the driver gave it no slot while six slots were empty, and the Keychron typed nothing with keydock not running; Windows listed it as started. That slot numbers are never reused before a restart is inferred from the counts, not read in the driver source. Documented in the README.
 - What is the built-in keyboard's hardware ID on the development laptop? This confirms the auto-detection rule.
   - Answered, and the first answer was wrong. A pass-through test that logged the source device of each key showed that the laptop keys come from the ITE USB device `HID\VID_048D&PID_C197&REV_1800&Col04`, not from the `ACPI\VEN_IDEA&DEV_0100` device. That disproved the hardware-ID rule; see Target above.

@@ -12,6 +12,7 @@ toml = "1.2.3"
 tray-icon = { version = "=0.26.1", default-features = false }
 windows = { version = "0.62", features = [
     "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Devices_HumanInterfaceDevice",
     "Win32_Devices_Properties",
     "Win32_Foundation",
     "Win32_Networking_WinHttp",

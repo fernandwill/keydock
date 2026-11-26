@@ -9,14 +9,16 @@ mod interception;
 mod update;
 
 use config::Config;
-use interception::{Blocker, Devices, Driver, Keyboard, Kind, ScanError};
+use devices::{Change, KeyboardWatch, Present};
+use interception::{Blocker, Devices, Driver, Keyboard, ScanError};
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     error::Error,
     io,
     path::PathBuf,
     process::ExitCode,
     sync::mpsc,
+    time::{Duration, Instant},
 };
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
@@ -32,14 +34,18 @@ use windows::{
         UI::{
             Shell::ShellExecuteW,
             WindowsAndMessaging::{
-                DispatchMessageW, GetMessageW, MB_ICONERROR, MSG, MessageBoxW, PostThreadMessageW,
-                SW_SHOWNORMAL, TranslateMessage, WM_APP,
+                DispatchMessageW, GetMessageW, KillTimer, MB_ICONERROR, MSG, MessageBoxW,
+                PostThreadMessageW, SW_SHOWNORMAL, SetTimer, TranslateMessage, WM_APP, WM_TIMER,
             },
         },
     },
     core::{HSTRING, PCWSTR, w},
 };
 
+// The driver's keyboard list lags Windows' arrival and removal reports; the lag was under 2 s
+// on the development laptop. keydock scans again at this interval for this long after a report.
+const RESCAN_INTERVAL_MS: u32 = 250;
+const RESCAN_WINDOW: Duration = Duration::from_secs(5);
 // ShellExecuteW reports success with a value above this.
 const SHELL_EXECUTE_MAX_ERROR: isize = 32;
 
@@ -72,13 +78,28 @@ fn run() -> Result<(), Box<dyn Error>> {
         return Ok(());
     };
     let (settings, config_error) = load_settings();
+    let mut notices: Vec<String> = config_error.into_iter().collect();
+    let main_thread = unsafe { GetCurrentThreadId() };
+    // Started before the first scan, so a keyboard plugged in meanwhile still causes a rescan.
+    let (change_sender, changes) = mpsc::channel();
+    let watch = KeyboardWatch::start(move |change| {
+        // Fails only once the message loop has ended.
+        let _ = change_sender.send(change);
+        wake(main_thread);
+    })
+    .map_err(|error| {
+        notices.push(format!(
+            "Keyboard changes are not watched ({error}); restart keydock after you plug a \
+             keyboard in or out"
+        ));
+    })
+    .ok();
     let (keyboards, driver) = match Driver::open() {
         Ok(driver) => (Ok(driver.keyboards()), Some(driver)),
         Err(error) => (Err(error), None),
     };
-    let (menu, found, items) = build_menu(config_error, &keyboards, &settings.config)?;
+    let (menu, found, items) = build_menu(&notices, &keyboards, &settings.config)?;
     let (tray, menu_events) = build_tray(&menu)?;
-    let main_thread = unsafe { GetCurrentThreadId() };
     // Spawned before the first refresh: the thread clears any filter left on the built-in
     // keyboard before it reads the first device set.
     let blocker =
@@ -96,6 +117,10 @@ fn run() -> Result<(), Box<dyn Error>> {
         pause: items.pause,
         reenable: items.reenable,
         quit_id: items.quit.id().clone(),
+        keyboards_menu: items.keyboards,
+        changes,
+        rescans: Rescans::default(),
+        _watch: watch,
         found,
         settings,
         blocker,
@@ -114,22 +139,36 @@ fn wake(main_thread: u32) {
 }
 
 struct MenuItems {
+    /// `None` when the driver is not available, so there is no list to update.
+    keyboards: Option<Submenu>,
     pause: CheckMenuItem,
     reenable: MenuItem,
     quit: MenuItem,
 }
 
 fn build_menu(
-    config_error: Option<String>,
+    notices: &[String],
     keyboards: &Result<Vec<Keyboard>, ScanError>,
     config: &Config,
 ) -> Result<(Menu, Found, MenuItems), Box<dyn Error>> {
     let menu = Menu::new();
-    if let Some(error) = config_error {
-        menu.append(&disabled(&error))?;
+    for notice in notices {
+        menu.append(&disabled(notice))?;
     }
-    let found = append_keyboards(&menu, keyboards, &devices::internal_keyboards(), config)?;
+    let (found, submenu) = match keyboards {
+        Ok(keyboards) => {
+            let submenu = Submenu::new("Keyboards", true);
+            let found = fill_keyboards(&submenu, keyboards, &devices::present_keyboards(), config)?;
+            menu.append(&submenu)?;
+            (found, Some(submenu))
+        }
+        Err(error) => {
+            menu.append(&disabled(&format!("Keyboards: {error}")))?;
+            (Found::default(), None)
+        }
+    };
     let items = MenuItems {
+        keyboards: submenu,
         pause: CheckMenuItem::new("Pause keydock", true, config.paused, None),
         // Always enabled: muda disables items without graying them, so a disabled item looks clickable.
         reenable: MenuItem::new("Re-enable until next connect", true, None),
@@ -208,12 +247,15 @@ fn load_settings() -> (Settings, Option<String>) {
     }
 }
 
-/// What the startup scan found.
+/// What the last keyboard scan found.
 #[derive(Default)]
 struct Found {
+    /// What the driver and Windows listed, to tell whether a new scan changed anything.
+    keyboards: Vec<Keyboard>,
+    present: Vec<Present>,
     /// Each allowlist checkbox and its VID:PID.
     checkboxes: HashMap<MenuId, String>,
-    /// VID:PID of each connected keyboard that can go on the allowlist.
+    /// VID:PID of each connected keyboard that has a driver slot, so it can trigger the block.
     external: Vec<String>,
     built_in: Devices,
 }
@@ -222,54 +264,148 @@ fn disabled(text: &str) -> MenuItem {
     MenuItem::new(interception::menu_text(text), false, None)
 }
 
-/// Lists the keyboards: built-in ones disabled, one checkbox per external VID:PID.
-fn append_keyboards(
-    menu: &Menu,
-    keyboards: &Result<Vec<Keyboard>, ScanError>,
-    internal: &windows::core::Result<HashSet<String>>,
+/// Lists the keyboards in `submenu`: built-in ones disabled, one checkbox per external VID:PID.
+fn fill_keyboards(
+    submenu: &Submenu,
+    keyboards: &[Keyboard],
+    present: &windows::core::Result<Vec<Present>>,
     config: &Config,
 ) -> Result<Found, Box<dyn Error>> {
-    let mut found = Found::default();
-    let keyboards = match keyboards {
-        Ok(keyboards) => keyboards,
-        Err(error) => {
-            menu.append(&disabled(&format!("Keyboards: {error}")))?;
-            return Ok(found);
-        }
+    let mut found = Found {
+        keyboards: keyboards.to_vec(),
+        present: present.as_ref().map_or_else(|_| Vec::new(), Clone::clone),
+        ..Found::default()
     };
-    let submenu = Submenu::new("Keyboards", true);
-    let none = HashSet::new();
-    // Without this check keydock cannot tell which keyboard is built in, so it blocks nothing.
-    let internal = internal.as_ref().unwrap_or_else(|error| {
-        let text = format!("Built-in keyboard check failed: {}", error.message());
-        // A failed append only loses this notice; the list below still works.
-        let _ = submenu.append(&disabled(&text));
-        &none
-    });
-    for keyboard in keyboards {
-        match interception::classify(&keyboard.id, internal) {
-            Kind::BuiltIn => {
-                found.built_in |= interception::device_bit(keyboard.device);
-                submenu.append(&disabled(&format!("{} (built-in)", keyboard.id)))?;
+    if let Err(error) = present {
+        // Without Windows' list keydock knows neither the built-in nor the external keyboards.
+        let text = format!("Keyboard check failed: {}", error.message());
+        submenu.append(&disabled(&text))?;
+    }
+    for entry in entries(keyboards, &found.present) {
+        match entry {
+            Entry::BuiltIn { device, id } => {
+                found.built_in |= interception::device_bit(device);
+                submenu.append(&disabled(&format!("{id} (built-in)")))?;
             }
-            // A keyboard with several interfaces lists the same VID:PID more than once.
-            Kind::External(vid_pid) if found.external.contains(&vid_pid) => {}
-            Kind::External(vid_pid) => {
-                let text = interception::menu_text(&format!("{vid_pid}: {}", keyboard.id));
+            Entry::Unblockable(id) => {
+                let text = format!("{id} (built-in, not blockable until Windows restarts)");
+                submenu.append(&disabled(&text))?;
+            }
+            Entry::External { vid_pid, id, slot } => {
+                let text = interception::menu_text(&format!("{vid_pid}: {id}"));
                 let checked = config.allowlist.contains(&vid_pid);
                 let item = CheckMenuItem::new(text, true, checked, None);
                 submenu.append(&item)?;
                 found.checkboxes.insert(item.id().clone(), vid_pid.clone());
-                found.external.push(vid_pid);
+                if slot {
+                    found.external.push(vid_pid);
+                } else {
+                    let text = format!(
+                        "{vid_pid} gets no input until Windows restarts (Interception device limit)"
+                    );
+                    submenu.append(&disabled(&text))?;
+                }
             }
-            Kind::Other => submenu.append(&disabled(&keyboard.id))?,
+            Entry::Other(id) => submenu.append(&disabled(&id))?,
         }
     }
     if found.built_in == 0 {
-        submenu.append(&disabled("No built-in keyboard found"))?;
+        submenu.append(&disabled("No blockable built-in keyboard found"))?;
     }
-    menu.append(&submenu)?;
     Ok(found)
+}
+
+#[derive(Debug, PartialEq)]
+enum Entry {
+    /// Part of the PC and in the driver's list, so keydock can block it.
+    BuiltIn {
+        device: i32,
+        id: String,
+    },
+    /// Part of the PC but missing from the driver's list, so keydock cannot block it.
+    Unblockable(String),
+    External {
+        vid_pid: String,
+        id: String,
+        /// Every interface has a driver slot. Without one the driver drops the keyboard's input,
+        /// so it must not trigger the block.
+        slot: bool,
+    },
+    Other(String),
+}
+
+/// The keyboard list. Windows' list decides what is present: the driver stops listing keyboards
+/// after about 10 arrivals since boot. The driver's list only supplies the device to block.
+fn entries(driver: &[Keyboard], present: &[Present]) -> Vec<Entry> {
+    let in_driver = |id: &str| driver.iter().find(|k| k.id.eq_ignore_ascii_case(id));
+    let mut entries = Vec::new();
+    let mut models: Vec<String> = Vec::new();
+    for keyboard in present {
+        if keyboard.internal {
+            let slot = in_driver(&keyboard.id);
+            entries.push(match slot {
+                Some(slot) => Entry::BuiltIn {
+                    device: slot.device,
+                    id: slot.id.clone(),
+                },
+                None => Entry::Unblockable(keyboard.id.clone()),
+            });
+            continue;
+        }
+        match interception::vid_pid(&keyboard.id) {
+            // A keyboard with several interfaces lists the same VID:PID more than once.
+            Some(vid_pid) if models.contains(&vid_pid) => {}
+            Some(vid_pid) => {
+                models.push(vid_pid.clone());
+                let slot = present
+                    .iter()
+                    .filter(|p| interception::vid_pid(&p.id).as_ref() == Some(&vid_pid))
+                    .all(|p| in_driver(&p.id).is_some());
+                entries.push(Entry::External {
+                    vid_pid,
+                    id: keyboard.id.clone(),
+                    slot,
+                });
+            }
+            None => entries.push(Entry::Other(keyboard.id.clone())),
+        }
+    }
+    entries
+}
+
+/// Scans again for `RESCAN_WINDOW` after each keyboard change, on a thread timer.
+#[derive(Default)]
+struct Rescans {
+    /// 0 when no timer runs.
+    timer: usize,
+    until: Option<Instant>,
+}
+
+impl Rescans {
+    fn start(&mut self) {
+        self.until = Some(Instant::now() + RESCAN_WINDOW);
+        if self.timer == 0 {
+            // If this fails, only the scan right at each report happens.
+            self.timer = unsafe { SetTimer(None, 0, RESCAN_INTERVAL_MS, None) };
+        }
+    }
+
+    /// Whether to scan now. After the window it stops the timer and allows one last scan.
+    fn due(&mut self) -> bool {
+        match self.until {
+            None => false,
+            Some(until) if Instant::now() < until => true,
+            Some(_) => {
+                self.until = None;
+                if self.timer != 0 {
+                    // A timer that fails to stop only causes extra ticks, which `until` ignores.
+                    let _ = unsafe { KillTimer(None, self.timer) };
+                    self.timer = 0;
+                }
+                true
+            }
+        }
+    }
 }
 
 /// The user's choices that decide whether to block.
@@ -293,6 +429,12 @@ impl Policy {
 
     fn blocking(&self) -> bool {
         self.triggered && !self.paused && !self.suspended
+    }
+
+    /// Windows reported an allowlisted keyboard arriving. Scans lag that report, so a quick
+    /// unplug and replug may never show the keyboard missing; the arrival alone ends a suspension.
+    fn allowlisted_arrived(&mut self) {
+        self.suspended = false;
     }
 }
 
@@ -326,6 +468,10 @@ struct App {
     pause: CheckMenuItem,
     reenable: MenuItem,
     quit_id: MenuId,
+    keyboards_menu: Option<Submenu>,
+    changes: mpsc::Receiver<Change>,
+    rescans: Rescans,
+    _watch: Option<KeyboardWatch>,
     found: Found,
     settings: Settings,
     policy: Policy,
@@ -429,6 +575,36 @@ impl App {
                     }
                 }
             }
+            let mut changed = false;
+            for change in self.changes.try_iter() {
+                changed = true;
+                let allowlist = &self.settings.config.allowlist;
+                if change.arrived
+                    && interception::vid_pid(&change.link)
+                        .is_some_and(|vid_pid| allowlist.contains(&vid_pid))
+                {
+                    self.policy.allowlisted_arrived();
+                }
+            }
+            if changed {
+                self.rescans.start();
+            }
+            let tick = message.message == WM_TIMER && message.wParam.0 == self.rescans.timer;
+            if (changed || tick)
+                && self.rescans.due()
+                && let Err(error) = self.rescan()
+            {
+                // Without a reliable list keydock cannot know what is connected, so it stops
+                // blocking; the next keyboard change tries again.
+                self.found = Found::default();
+                self.policy.set_triggered(false);
+                if let Err(error) = self.refresh() {
+                    show_error(&format!("keydock could not update its state: {error}"));
+                }
+                show_error(&format!(
+                    "keydock could not update the keyboard list: {error}"
+                ));
+            }
             if self.blocker.as_ref().is_some_and(Blocker::stopped) {
                 // Dropping joins the finished thread. Its driver connection closed, which
                 // cleared the filters, so the built-in keyboard already works.
@@ -442,6 +618,34 @@ impl App {
                 }
             }
         }
+    }
+
+    /// Reads the connected keyboards again and applies the result.
+    fn rescan(&mut self) -> Result<(), Box<dyn Error>> {
+        let (Some(blocker), Some(submenu)) = (&self.blocker, &self.keyboards_menu) else {
+            return Ok(());
+        };
+        // A stopped thread has its own message in the loop.
+        if blocker.stopped() {
+            return Ok(());
+        }
+        let Some(keyboards) = blocker.keyboards() else {
+            return Err("the input thread did not answer".into());
+        };
+        let present = devices::present_keyboards();
+        let unchanged = keyboards == self.found.keyboards
+            && present
+                .as_ref()
+                .is_ok_and(|present| *present == self.found.present);
+        // Most scans in a rescan window find nothing new; rebuilding the menu then is wasted.
+        if !unchanged {
+            while submenu.remove_at(0).is_some() {}
+            let found = fill_keyboards(submenu, &keyboards, &present, &self.settings.config)?;
+            self.found = found;
+            self.policy.set_triggered(self.triggered());
+        }
+        // Also applies an arrival that ended a suspension.
+        self.refresh()
     }
 
     /// Puts the result of an update check in the menu and tooltip.
@@ -529,6 +733,89 @@ fn keyboard_icon() -> Result<Icon, tray_icon::BadIcon> {
 mod tests {
     use super::*;
 
+    fn keyboard(device: i32, id: &str) -> Keyboard {
+        Keyboard {
+            device,
+            id: id.to_string(),
+        }
+    }
+
+    fn present(id: &str, internal: bool) -> Present {
+        Present {
+            id: id.to_string(),
+            internal,
+        }
+    }
+
+    const ITE: &str = r"HID\VID_048D&PID_C197&REV_1800&Col04";
+    const KEYCHRON: &str = r"HID\VID_3434&PID_0351&REV_0101&MI_00";
+
+    const KEYCHRON_2: &str = r"HID\VID_3434&PID_0351&REV_0101&MI_02&Col04";
+
+    #[test]
+    fn a_keyboard_missing_from_the_driver_is_listed_without_a_slot() {
+        let driver = [keyboard(2, ITE)];
+        let present = [present(ITE, true), present(KEYCHRON, false)];
+        assert_eq!(
+            entries(&driver, &present),
+            [
+                Entry::BuiltIn {
+                    device: 2,
+                    id: ITE.into()
+                },
+                Entry::External {
+                    vid_pid: "3434:0351".into(),
+                    id: KEYCHRON.into(),
+                    slot: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn a_keyboard_has_a_slot_only_if_every_interface_has_one() {
+        let present = [present(KEYCHRON, false), present(KEYCHRON_2, false)];
+        let external = |slot| Entry::External {
+            vid_pid: "3434:0351".into(),
+            id: KEYCHRON.into(),
+            slot,
+        };
+        let both = [
+            keyboard(3, KEYCHRON),
+            keyboard(4, &KEYCHRON_2.to_lowercase()),
+        ];
+        assert_eq!(entries(&both, &present), [external(true)]);
+        assert_eq!(entries(&both[1..], &present), [external(false)]);
+    }
+
+    #[test]
+    fn a_built_in_keyboard_needs_a_driver_slot_to_be_blockable() {
+        let present = [present(ITE, true)];
+        assert_eq!(entries(&[], &present), [Entry::Unblockable(ITE.into())]);
+    }
+
+    #[test]
+    fn windows_decides_what_is_present_and_one_model_gets_one_entry() {
+        // The driver still lists a keyboard that Windows already reported gone.
+        let driver = [keyboard(3, KEYCHRON)];
+        let present = [
+            present(r"HID\VID_046D&PID_C547&REV_0402&MI_01&Col01", false),
+            present(r"HID\VID_046D&PID_C547&REV_0402&MI_02", false),
+            present(r"ACPI\VEN_ABCD&DEV_0001", false),
+        ];
+        assert_eq!(
+            entries(&driver, &present),
+            [
+                Entry::External {
+                    vid_pid: "046D:C547".into(),
+                    id: r"HID\VID_046D&PID_C547&REV_0402&MI_01&Col01".into(),
+                    slot: false
+                },
+                Entry::Other(r"ACPI\VEN_ABCD&DEV_0001".into()),
+            ]
+        );
+    }
+
     #[test]
     fn blocks_only_while_triggered_and_neither_paused_nor_suspended() {
         let mut policy = Policy::default();
@@ -553,6 +840,18 @@ mod tests {
         assert!(policy.suspended);
         policy.set_triggered(true);
         assert!(!policy.suspended);
+        assert!(policy.blocking());
+    }
+
+    #[test]
+    fn an_arrival_report_ends_a_suspension_even_if_no_scan_saw_the_keyboard_leave() {
+        let mut policy = Policy::default();
+        policy.set_triggered(true);
+        policy.suspended = true;
+        // The scans after the unplug and the replug both still list the keyboard.
+        policy.set_triggered(true);
+        policy.allowlisted_arrived();
+        policy.set_triggered(true);
         assert!(policy.blocking());
     }
 

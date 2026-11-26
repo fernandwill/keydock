@@ -1,5 +1,4 @@
 use std::{
-    collections::HashSet,
     ffi::c_void,
     fmt,
     sync::{
@@ -7,6 +6,7 @@ use std::{
         mpsc::{self, Receiver, Sender, TryRecvError},
     },
     thread::{self, JoinHandle},
+    time::Duration,
 };
 use windows::{
     Win32::{
@@ -25,6 +25,8 @@ const HARDWARE_ID_UNITS: usize = 512;
 const FILTER_NONE: u16 = 0x0000;
 const FILTER_KEY_ALL: u16 = 0xFFFF;
 const KEY_UP: u16 = 0x01;
+// Ample for a scan, which takes a few milliseconds plus at most one wait of POLL_MS.
+const SCAN_TIMEOUT: Duration = Duration::from_secs(2);
 // While blocking, how long the input thread waits for a key before it checks for a new device set.
 const POLL_MS: u32 = 50;
 
@@ -115,6 +117,7 @@ impl Drop for Context {
     }
 }
 
+#[derive(Clone, PartialEq)]
 pub struct Keyboard {
     pub device: i32,
     /// The first hardware ID.
@@ -235,9 +238,15 @@ impl Driver {
     }
 }
 
-/// The input thread. It owns the driver and blocks the devices in the last set it was sent.
+enum Request {
+    Block(Devices),
+    Scan(Sender<Vec<Keyboard>>),
+}
+
+/// The input thread. It owns the driver, blocks the devices in the last set it was sent, and
+/// scans for keyboards on request.
 pub struct Blocker {
-    devices: Option<Sender<Devices>>,
+    requests: Option<Sender<Request>>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -249,22 +258,29 @@ impl Blocker {
         built_in: Devices,
         stopped: impl Fn() + std::marker::Send + 'static,
     ) -> Self {
-        let (devices, requests) = mpsc::channel();
+        let (sender, requests) = mpsc::channel();
         let thread = thread::spawn(move || {
             let _stopped = OnDrop(stopped);
             block_loop(&driver, built_in, &requests);
         });
         Self {
-            devices: Some(devices),
+            requests: Some(sender),
             thread: Some(thread),
         }
     }
 
     pub fn block(&self, devices: Devices) {
-        if let Some(sender) = &self.devices {
+        if let Some(requests) = &self.requests {
             // Fails only if the thread panicked; its driver closed then, which cleared the filters.
-            let _ = sender.send(devices);
+            let _ = requests.send(Request::Block(devices));
         }
+    }
+
+    /// Every connected keyboard, or `None` if the input thread has stopped.
+    pub fn keyboards(&self) -> Option<Vec<Keyboard>> {
+        let (reply, keyboards) = mpsc::channel();
+        self.requests.as_ref()?.send(Request::Scan(reply)).ok()?;
+        keyboards.recv_timeout(SCAN_TIMEOUT).ok()
     }
 
     pub fn stopped(&self) -> bool {
@@ -283,7 +299,7 @@ impl<F: Fn()> Drop for OnDrop<F> {
 impl Drop for Blocker {
     fn drop(&mut self) {
         // Closing the channel tells the thread to clear its filters and stop.
-        self.devices = None;
+        self.requests = None;
         if let Some(thread) = self.thread.take() {
             // A panic in the thread already closed its driver; there is nothing left to undo.
             let _ = thread.join();
@@ -291,7 +307,7 @@ impl Drop for Blocker {
     }
 }
 
-fn block_loop(driver: &Driver, built_in: Devices, requests: &Receiver<Devices>) {
+fn block_loop(driver: &Driver, built_in: Devices, requests: &Receiver<Request>) {
     driver.set_filter(built_in, FILTER_NONE);
     let mut blocked: Devices = 0;
     loop {
@@ -303,7 +319,12 @@ fn block_loop(driver: &Driver, built_in: Devices, requests: &Receiver<Devices>) 
             requests.try_recv()
         };
         match request {
-            Ok(devices) => {
+            Ok(Request::Scan(reply)) => {
+                // The caller gave up after SCAN_TIMEOUT if this fails; nothing to do.
+                let _ = reply.send(driver.keyboards());
+                continue;
+            }
+            Ok(Request::Block(devices)) => {
                 driver.set_filter(blocked & !devices, FILTER_NONE);
                 driver.set_filter(devices, FILTER_KEY_ALL);
                 blocked = devices;
@@ -337,23 +358,6 @@ pub fn hardware_ids(buffer: &[u16], bytes: u32) -> Vec<String> {
         .filter(|id| !id.is_empty())
         .map(String::from_utf16_lossy)
         .collect()
-}
-
-#[derive(Debug, PartialEq)]
-pub enum Kind {
-    /// Part of the PC: keydock blocks it.
-    BuiltIn,
-    /// Can go on the allowlist, keyed by VID:PID.
-    External(String),
-    Other,
-}
-
-/// `internal` holds the upper-case first hardware IDs of keyboards that are part of the PC.
-pub fn classify(id: &str, internal: &HashSet<String>) -> Kind {
-    if internal.contains(&id.to_ascii_uppercase()) {
-        return Kind::BuiltIn;
-    }
-    vid_pid(id).map_or(Kind::Other, Kind::External)
 }
 
 /// `VID:PID` in upper case from USB (`VID_046D&PID_C52B`) and Bluetooth (`VID&0002046d_PID&b342`) IDs.
@@ -412,22 +416,6 @@ mod tests {
     fn hardware_ids_ignore_a_length_past_the_buffer() {
         let buffer = utf16("ACPI\\PNP0303");
         assert_eq!(hardware_ids(&buffer, 4096), ids(&["ACPI\\PNP0303"]));
-    }
-
-    #[test]
-    fn keyboards_that_are_part_of_the_pc_are_built_in_whatever_their_id() {
-        // The real laptop keyboard of the development machine is a USB HID device.
-        let internal = HashSet::from([r"HID\VID_048D&PID_C197&REV_1800&COL04".to_string()]);
-        assert_eq!(
-            classify(r"HID\VID_048D&PID_C197&REV_1800&Col04", &internal),
-            Kind::BuiltIn
-        );
-        assert_eq!(
-            classify(r"HID\VID_3434&PID_0351&REV_0101&MI_00", &internal),
-            Kind::External("3434:0351".into())
-        );
-        // An ACPI ID alone no longer makes a keyboard built-in.
-        assert_eq!(classify(r"ACPI\VEN_IDEA&DEV_0100", &internal), Kind::Other);
     }
 
     #[test]
