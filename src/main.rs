@@ -85,10 +85,13 @@ fn keyboard_icon() -> Result<Icon, tray_icon::BadIcon> {
         "                ",
         "                ",
     ];
-    let rgba = KEYS.iter().flat_map(|row| row.bytes()).flat_map(|pixel| match pixel {
-        b'#' => [240, 240, 240, 255],
-        b'.' => [55, 55, 55, 255],
-        _ => [0, 0, 0, 0],
-    });
+    let rgba = KEYS
+        .iter()
+        .flat_map(|row| row.bytes())
+        .flat_map(|pixel| match pixel {
+            b'#' => [240, 240, 240, 255],
+            b'.' => [55, 55, 55, 255],
+            _ => [0, 0, 0, 0],
+        });
     Icon::from_rgba(rgba.collect(), KEYS[0].len() as u32, KEYS.len() as u32)
 }
