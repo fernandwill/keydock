@@ -83,7 +83,7 @@ A user must never be left with no working keyboard.
 
 ## Release
 
-- A portable zip attached to GitHub Releases: `keydock.exe`, the bundled Interception files, `NOTICE.txt`, and the LGPL and GPL texts.
+- A portable zip attached to GitHub Releases: `keydock.exe`, the bundled Interception files, `NOTICE.txt`, keydock's MIT license, and the LGPL and GPL texts.
 - The `release` workflow builds it when a `v*` tag is pushed and fails if the tag does not match the `Cargo.toml` version.
 - `scripts/package-release.sh` downloads Interception and the GPL text at pinned URLs and checks their SHA-256 before packaging. The repository holds no third-party binaries.
 - winget or MSI: not in v1.

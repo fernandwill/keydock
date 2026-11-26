@@ -33,6 +33,10 @@ This version does not use a driver yet. The [v1 design](docs/DESIGN.md) uses the
 
 The release zip bundles Interception 1.0.1: `interception.dll`, `install-interception.exe`, and the LGPL and GPL texts. To install the driver, open a terminal as administrator in the unzipped folder, run `install-interception.exe /install`, and restart Windows. To remove it, run `install-interception.exe /uninstall` and restart. The repository itself contains no Interception files.
 
+## License
+
+keydock is MIT-licensed; see [LICENSE](LICENSE). The bundled Interception files keep their own terms (see Driver above).
+
 ## Release
 
 Set `version` in `Cargo.toml`, commit, then push a matching tag (for example `v0.2.0`). The `release` workflow checks that the tag matches the version, builds keydock, runs `scripts/package-release.sh` to download Interception at a pinned SHA-256, and publishes `keydock-<tag>-x64.zip` as a GitHub release. To build the zip locally, run `cargo build --release --locked` and then `bash scripts/package-release.sh v0.1.0`.

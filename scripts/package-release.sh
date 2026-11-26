@@ -20,6 +20,7 @@ unzip -q "$work/Interception.zip" -d "$work"
 stage="$work/keydock-$tag-x64"
 mkdir -p "$stage/licenses" dist
 cp target/release/keydock.exe "$stage/"
+cp LICENSE "$stage/licenses/keydock-MIT.txt"
 cp "$work/Interception/library/x64/interception.dll" "$stage/"
 cp "$work/Interception/command line installer/install-interception.exe" "$stage/"
 cp "$work/Interception/licenses/non-commercial-usage/LGPL 3.0.txt" "$stage/licenses/Interception-LGPL-3.0.txt"
