@@ -10,7 +10,7 @@ With a current stable Rust toolchain installed, run this command from the reposi
 cargo run
 ```
 
-Look for the keyboard icon in the Windows notification area (check hidden icons if necessary). Hover over it to see `keydock: inactive`. Right-click and choose **Quit** to exit. There is no application window.
+Look for the keyboard icon in the Windows notification area (check hidden icons if necessary). Hover over it to see `keydock: inactive`. Right-click and choose **Quit** to exit. There is no application window. Only one keydock runs per Windows session: if keydock is already running, a second start exits at once with no message.
 
 ## Check the Quit action
 
@@ -21,7 +21,7 @@ cargo build --locked
 python tests/tray_quit.py target/debug/keydock.exe
 ```
 
-The check opens a native menu for its own keydock process. Leave the menu alone until the check finishes. This desktop check is separate from `cargo test`.
+The check also starts a second keydock and expects it to exit. Then it opens a native menu for its own keydock process. Leave the menu alone until the check finishes. This desktop check is separate from `cargo test`.
 
 ## Driver
 

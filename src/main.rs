@@ -9,9 +9,13 @@ use tray_icon::{
     menu::{Menu, MenuEvent, MenuItem},
 };
 use windows::{
-    Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, MB_ICONERROR, MSG, MessageBoxW, PostQuitMessage,
-        TranslateMessage,
+    Win32::{
+        Foundation::{ERROR_ALREADY_EXISTS, GetLastError},
+        System::Threading::CreateMutexW,
+        UI::WindowsAndMessaging::{
+            DispatchMessageW, GetMessageW, MB_ICONERROR, MSG, MessageBoxW, PostQuitMessage,
+            TranslateMessage,
+        },
     },
     core::{HSTRING, w},
 };
@@ -26,6 +30,11 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
+    // The handle stays open until the process exits; that is what holds the single-instance lock.
+    let _instance = unsafe { CreateMutexW(None, false, w!(r"Local\keydock")) }?;
+    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+        return Ok(());
+    }
     let quit = MenuItem::new("Quit", true, None);
     let menu = Menu::with_items(&[&quit])?;
     let quit_id = quit.id().clone();

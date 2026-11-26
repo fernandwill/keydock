@@ -39,10 +39,22 @@ def post(hwnd, message, key, data):
         raise c.WinError(c.get_last_error())
 
 
+def check_second_instance_exits(binary):
+    second = subprocess.Popen([binary])
+    try:
+        if second.wait(timeout=TIMEOUT) != 0:
+            raise RuntimeError(f"Second keydock returned exit code {second.returncode}")
+    except subprocess.TimeoutExpired:
+        second.kill()
+        second.wait(timeout=TIMEOUT)
+        raise RuntimeError("A second keydock kept running next to the first") from None
+
+
 def check_quit(binary):
     process = subprocess.Popen([binary])
     try:
         tray = window(process, TRAY_CLASS)
+        check_second_instance_exits(binary)
         post(tray, TRAY_CALLBACK, 0, WM_RBUTTONUP)
         popup = window(process, "#32768")
         menu = c.c_size_t()
@@ -64,4 +76,4 @@ def check_quit(binary):
 
 if __name__ == "__main__":
     check_quit(Path(sys.argv[1]).resolve())
-    print("PASS: keydock opened its native menu and Quit exited with status 0.")
+    print("PASS: a second keydock exited, the native menu opened, and Quit exited with status 0.")
