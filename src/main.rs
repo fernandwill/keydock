@@ -4,12 +4,13 @@
 compile_error!("keydock supports Windows only");
 
 mod config;
+mod devices;
 mod interception;
 mod update;
 
 use config::Config;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     error::Error,
     io,
     path::PathBuf,
@@ -154,7 +155,10 @@ fn toggle(allowlist: &Mutex<Allowlist>, vid_pid: &str) {
     };
     // After the lock is released: the message box runs a message loop that can deliver another click.
     if let Err(error) = result {
-        show_error(&format!("keydock could not save the allowlist: {error}"));
+        show_error(&format!(
+            "keydock could not save the allowlist: {error}\nThe change applies until keydock \
+             quits; the next change saves the whole list again."
+        ));
     }
 }
 
@@ -175,10 +179,21 @@ fn append_keyboards(
     };
     let builtin = interception::find_builtin(&ids);
     let keyboards = Submenu::new("Keyboards", true);
+    // Devices that are part of the PC are always connected, so they must never trigger the block.
+    let internal = devices::internal_keyboards().unwrap_or_else(|error| {
+        let text = format!("Internal device check failed: {}", error.message());
+        // A failed append only loses this notice; the list below still works.
+        let _ = keyboards.append(&MenuItem::new(interception::menu_text(&text), false, None));
+        HashSet::new()
+    });
     for (index, id) in ids.iter().enumerate() {
         let text = interception::menu_text(id);
         if builtin == Some(index) {
             keyboards.append(&MenuItem::new(format!("{text} (built-in)"), false, None))?;
+            continue;
+        }
+        if internal.contains(&id.to_ascii_uppercase()) {
+            keyboards.append(&MenuItem::new(format!("{text} (internal)"), false, None))?;
             continue;
         }
         match interception::vid_pid(id) {

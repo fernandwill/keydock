@@ -34,7 +34,7 @@ If the driver is missing at startup, keydock stays inactive and shows an error t
 
 - Only keyboards on the allowlist trigger the block. Receiver dongles, YubiKeys and headsets often report as keyboards, so "any external keyboard" would block by mistake.
 - keydock identifies a keyboard by VID:PID, read from the Interception hardware ID (`HID\VID_xxxx&PID_xxxx...`). This matches the same model on any port and after Bluetooth re-pairing. Two units of the same model both match.
-- The user edits the allowlist in a tray submenu that lists connected keyboards with checkboxes. A keyboard with several interfaces (same VID:PID) gets one checkbox. The built-in keyboard gets none.
+- The user edits the allowlist in a tray submenu that lists connected keyboards with checkboxes. A keyboard with several interfaces (same VID:PID) gets one checkbox. The built-in keyboard gets none. Neither do devices that Windows places in the PC's own device container (`DEVPKEY_Device_InLocalMachineContainer`, read through SetupAPI and matched by first hardware ID): they are always connected, so checking one would keep the built-in keyboard blocked.
 
 ### Target: the built-in keyboard only
 

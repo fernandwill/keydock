@@ -124,7 +124,7 @@ pub fn scan() -> Result<Vec<String>, ScanError> {
 }
 
 /// Turns a REG_MULTI_SZ buffer of `bytes` length into its strings.
-fn hardware_ids(buffer: &[u16], bytes: u32) -> Vec<String> {
+pub fn hardware_ids(buffer: &[u16], bytes: u32) -> Vec<String> {
     let units = (bytes as usize / 2).min(buffer.len());
     buffer[..units]
         .split(|&unit| unit == 0)
