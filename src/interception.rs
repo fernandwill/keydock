@@ -148,6 +148,30 @@ pub fn find_builtin(ids: &[String]) -> Option<usize> {
     }
 }
 
+/// `VID:PID` in upper case from USB (`VID_046D&PID_C52B`) and Bluetooth (`VID&0002046d_PID&b342`) IDs.
+pub fn vid_pid(id: &str) -> Option<String> {
+    let id = id.to_ascii_uppercase();
+    let vid = hex_after(&id, ["VID_", "VID&"])?;
+    let pid = hex_after(&id, ["PID_", "PID&"])?;
+    if vid.len() < 4 || pid.len() < 4 {
+        return None;
+    }
+    // Bluetooth puts the VID source before the VID (`0002046D`), so the VID is the last 4 digits.
+    Some(format!("{}:{}", &vid[vid.len() - 4..], &pid[..4]))
+}
+
+/// The hex digits right after the first marker found.
+fn hex_after<'a>(id: &'a str, markers: [&str; 2]) -> Option<&'a str> {
+    let start = markers
+        .iter()
+        .find_map(|marker| id.find(marker).map(|index| index + marker.len()))?;
+    let rest = &id[start..];
+    let end = rest
+        .find(|c: char| !c.is_ascii_hexdigit())
+        .unwrap_or(rest.len());
+    Some(&rest[..end])
+}
+
 /// Windows menus read `&` as a mnemonic marker.
 pub fn menu_text(text: &str) -> String {
     text.replace('&', "&&")
@@ -197,6 +221,31 @@ mod tests {
         assert_eq!(find_builtin(&ids(&[usb, ps2])), Some(1));
         assert_eq!(find_builtin(&ids(&[usb])), None);
         assert_eq!(find_builtin(&ids(&[ps2, usb, ps2])), None);
+    }
+
+    #[test]
+    fn vid_pid_reads_usb_and_bluetooth_ids() {
+        assert_eq!(
+            vid_pid(r"HID\VID_3434&PID_0351&REV_0101&MI_00").as_deref(),
+            Some("3434:0351")
+        );
+        assert_eq!(
+            vid_pid(r"HID\{00001124-0000-1000-8000-00805f9b34fb}_VID&0002046d_PID&b342&Col01")
+                .as_deref(),
+            Some("046D:B342")
+        );
+        assert_eq!(
+            vid_pid(r"HID\{00001812-0000-1000-8000-00805f9b34fb}_Dev_VID&02046d_PID&b023_REV&0001")
+                .as_deref(),
+            Some("046D:B023")
+        );
+    }
+
+    #[test]
+    fn vid_pid_rejects_ids_without_both_parts() {
+        assert_eq!(vid_pid(r"ACPI\VEN_IDEA&DEV_0100"), None);
+        assert_eq!(vid_pid(r"HID\VID_3434"), None);
+        assert_eq!(vid_pid(r"HID\VID_34&PID_0351"), None);
     }
 
     #[test]

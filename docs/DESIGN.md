@@ -34,7 +34,7 @@ If the driver is missing at startup, keydock stays inactive and shows an error t
 
 - Only keyboards on the allowlist trigger the block. Receiver dongles, YubiKeys and headsets often report as keyboards, so "any external keyboard" would block by mistake.
 - keydock identifies a keyboard by VID:PID, read from the Interception hardware ID (`HID\VID_xxxx&PID_xxxx...`). This matches the same model on any port and after Bluetooth re-pairing. Two units of the same model both match.
-- The user edits the allowlist in a tray submenu that lists connected keyboards with checkboxes.
+- The user edits the allowlist in a tray submenu that lists connected keyboards with checkboxes. A keyboard with several interfaces (same VID:PID) gets one checkbox. The built-in keyboard gets none.
 
 ### Target: the built-in keyboard only
 
@@ -66,7 +66,8 @@ A user must never be left with no working keyboard.
 
 ## Config
 
-- File: `%APPDATA%\keydock\config.toml` (from `dirs::config_dir()`).
+- File: `%APPDATA%\keydock\config.toml` (from `SHGetKnownFolderPath(FOLDERID_RoamingAppData)`, so no `dirs` crate).
+- keydock writes a temporary file and renames it, so a crash never leaves a half-written config. If the file exists but cannot be read, keydock starts with an empty allowlist and does not save, so it never overwrites the user's file.
 - Holds: the allowlist (VID:PID list), the built-in keyboard override, the paused flag.
 
 ## Autostart

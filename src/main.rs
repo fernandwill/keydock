@@ -3,13 +3,22 @@
 #[cfg(not(windows))]
 compile_error!("keydock supports Windows only");
 
+mod config;
 mod interception;
 mod update;
 
-use std::{error::Error, io, process::ExitCode, sync::mpsc};
+use config::Config;
+use std::{
+    collections::HashMap,
+    error::Error,
+    io,
+    path::PathBuf,
+    process::ExitCode,
+    sync::{Mutex, PoisonError, mpsc},
+};
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
+    menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu},
 };
 use update::Outcome;
 use windows::{
@@ -64,16 +73,23 @@ fn run() -> Result<(), Box<dyn Error>> {
     let quit = MenuItem::new("Quit", true, None);
     let update = MenuItem::new("", true, None);
     let menu = Menu::new();
-    append_keyboards(&menu)?;
+    let (allowlist, config_error) = load_allowlist();
+    if let Some(error) = config_error {
+        menu.append(&MenuItem::new(interception::menu_text(&error), false, None))?;
+    }
+    let checkboxes = append_keyboards(&menu, &allowlist.config)?;
     menu.append_items(&[&PredefinedMenuItem::separator(), &quit])?;
     let quit_id = quit.id().clone();
     let update_id = update.id().clone();
+    let allowlist = Mutex::new(allowlist);
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         // The native menu dispatches its command on the tray's message-loop thread.
         if event.id == quit_id {
             unsafe { PostQuitMessage(0) };
         } else if event.id == update_id {
             open_releases_page();
+        } else if let Some(vid_pid) = checkboxes.get(&event.id) {
+            toggle(&allowlist, vid_pid);
         }
     }));
     // Without a handler, tray-icon queues pointer events that keydock never reads.
@@ -93,25 +109,89 @@ fn run() -> Result<(), Box<dyn Error>> {
     message_loop(&menu, &update, &tray, &update_results)
 }
 
-/// Read-only list of keyboards from the driver; keydock does not block anything yet.
-fn append_keyboards(menu: &Menu) -> Result<(), Box<dyn Error>> {
+struct Allowlist {
+    config: Config,
+    /// `None` when saving would overwrite a config keydock could not read, or the folder is unknown.
+    path: Option<PathBuf>,
+}
+
+/// Returns the allowlist and, if the config could not be used, a message for the menu.
+fn load_allowlist() -> (Allowlist, Option<String>) {
+    let unsaved = |error: String| {
+        let allowlist = Allowlist {
+            config: Config::default(),
+            path: None,
+        };
+        (allowlist, Some(format!("{error}; changes are not saved")))
+    };
+    let path = match config::path() {
+        Ok(path) => path,
+        Err(error) => return unsaved(format!("Config folder unknown: {}", error.message())),
+    };
+    match config::load(&path) {
+        Ok(config) => (
+            Allowlist {
+                config,
+                path: Some(path),
+            },
+            None,
+        ),
+        Err(error) => unsaved(error),
+    }
+}
+
+fn toggle(allowlist: &Mutex<Allowlist>, vid_pid: &str) {
+    let result = {
+        let mut allowlist = allowlist.lock().unwrap_or_else(PoisonError::into_inner);
+        let list = &mut allowlist.config.allowlist;
+        if !list.remove(vid_pid) {
+            list.insert(vid_pid.to_string());
+        }
+        match &allowlist.path {
+            Some(path) => config::save(path, &allowlist.config),
+            None => Ok(()),
+        }
+    };
+    // After the lock is released: the message box runs a message loop that can deliver another click.
+    if let Err(error) = result {
+        show_error(&format!("keydock could not save the allowlist: {error}"));
+    }
+}
+
+/// Lists the keyboards from the driver. Each external VID:PID gets one checkbox; the returned map
+/// links each checkbox to its VID:PID. keydock does not block anything yet.
+fn append_keyboards(
+    menu: &Menu,
+    config: &Config,
+) -> Result<HashMap<MenuId, String>, Box<dyn Error>> {
+    let mut checkboxes = HashMap::new();
     let ids = match interception::scan() {
         Ok(ids) => ids,
         Err(error) => {
             let text = interception::menu_text(&format!("Keyboards: {error}"));
-            return Ok(menu.append(&MenuItem::new(text, false, None))?);
+            menu.append(&MenuItem::new(text, false, None))?;
+            return Ok(checkboxes);
         }
     };
     let builtin = interception::find_builtin(&ids);
     let keyboards = Submenu::new("Keyboards", true);
     for (index, id) in ids.iter().enumerate() {
-        let mark = if builtin == Some(index) {
-            " (built-in)"
-        } else {
-            ""
-        };
-        let text = format!("{}{mark}", interception::menu_text(id));
-        keyboards.append(&MenuItem::new(text, false, None))?;
+        let text = interception::menu_text(id);
+        if builtin == Some(index) {
+            keyboards.append(&MenuItem::new(format!("{text} (built-in)"), false, None))?;
+            continue;
+        }
+        match interception::vid_pid(id) {
+            // A keyboard with several interfaces lists the same VID:PID more than once.
+            Some(vid_pid) if checkboxes.values().any(|known| known == &vid_pid) => {}
+            Some(vid_pid) => {
+                let checked = config.allowlist.contains(&vid_pid);
+                let item = CheckMenuItem::new(format!("{vid_pid}: {text}"), true, checked, None);
+                keyboards.append(&item)?;
+                checkboxes.insert(item.id().clone(), vid_pid);
+            }
+            None => keyboards.append(&MenuItem::new(text, false, None))?,
+        }
     }
     if builtin.is_none() {
         keyboards.append(&MenuItem::new(
@@ -120,7 +200,8 @@ fn append_keyboards(menu: &Menu) -> Result<(), Box<dyn Error>> {
             None,
         ))?;
     }
-    Ok(menu.append(&keyboards)?)
+    menu.append(&keyboards)?;
+    Ok(checkboxes)
 }
 
 fn message_loop(
