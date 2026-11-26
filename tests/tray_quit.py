@@ -16,10 +16,10 @@ TIMEOUT = 5
 TRAY_CLASS = "tray_icon_app"
 TRAY_CALLBACK = 6002
 WM_RBUTTONUP = 0x0205
-WM_KEYDOWN = 0x0100
+WM_CANCELMODE = 0x001F
+WM_COMMAND = 0x0111
 MN_GETHMENU = 0x01E1
 MF_BYPOSITION = 0x0400
-VK_DOWN, VK_RETURN = 0x28, 0x0D
 MUTEX_NAME = r"Local\keydock"
 ERROR_ALREADY_EXISTS = 183
 SDDL_REVISION_1 = 1
@@ -96,8 +96,14 @@ def check_quit(binary):
         user32.GetMenuStringW(w.HMENU(menu.value), 0, label, len(label), MF_BYPOSITION)
         if label.value != "Quit":
             raise RuntimeError(f"Expected Quit as the first item, found {label.value!r}")
-        post(popup, WM_KEYDOWN, VK_DOWN, 0)
-        post(popup, WM_KEYDOWN, VK_RETURN, 0)
+        # Replay a click: close the menu, then send its command. Posted keystrokes are unreliable
+        # because the menu can drop them when keydock is not foreground, and a command that arrives
+        # while the menu is open loses the quit inside the menu loop.
+        quit_id = user32.GetMenuItemID(w.HMENU(menu.value), 0)
+        if quit_id == -1:
+            raise RuntimeError("Quit has no command id")
+        post(tray, WM_CANCELMODE, 0, 0)
+        post(tray, WM_COMMAND, quit_id, 0)
         if process.wait(timeout=TIMEOUT) != 0:
             raise RuntimeError(f"Quit returned exit code {process.returncode}")
     finally:
