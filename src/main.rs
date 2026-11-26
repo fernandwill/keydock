@@ -13,7 +13,9 @@ use tray_icon::{
 use update::Outcome;
 use windows::{
     Win32::{
-        Foundation::{ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, GetLastError, LPARAM, WPARAM},
+        Foundation::{
+            ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, LPARAM, WPARAM,
+        },
         System::Threading::{CreateMutexW, GetCurrentThreadId},
         UI::{
             Shell::ShellExecuteW,
@@ -32,25 +34,32 @@ const SHELL_EXECUTE_MAX_ERROR: isize = 32;
 
 fn main() -> ExitCode {
     if let Err(error) = run() {
-        let message = HSTRING::from(format!("keydock could not continue: {error}"));
-        unsafe { MessageBoxW(None, &message, w!("keydock"), MB_ICONERROR) };
+        show_error(&format!("keydock could not continue: {error}"));
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
 }
 
+fn show_error(message: &str) {
+    unsafe { MessageBoxW(None, &HSTRING::from(message), w!("keydock"), MB_ICONERROR) };
+}
+
+/// Takes the single-instance lock; `None` means another keydock already holds it.
+fn single_instance_lock() -> windows::core::Result<Option<HANDLE>> {
+    match unsafe { CreateMutexW(None, false, w!(r"Local\keydock")) } {
+        Ok(_) if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS => Ok(None),
+        Ok(handle) => Ok(Some(handle)),
+        // An elevated keydock's lock denies access to a normal start.
+        Err(error) if error.code() == ERROR_ACCESS_DENIED.to_hresult() => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
 fn run() -> Result<(), Box<dyn Error>> {
     // The handle stays open until the process exits; that is what holds the single-instance lock.
-    let instance = unsafe { CreateMutexW(None, false, w!(r"Local\keydock")) };
-    let already_running = match &instance {
-        Ok(_) => unsafe { GetLastError() == ERROR_ALREADY_EXISTS },
-        // An elevated keydock's lock denies access to a normal start.
-        Err(error) => error.code() == ERROR_ACCESS_DENIED.to_hresult(),
-    };
-    if already_running {
+    let Some(_instance) = single_instance_lock()? else {
         return Ok(());
-    }
-    let _instance = instance?;
+    };
     let quit = MenuItem::new("Quit", true, None);
     let update = MenuItem::new("", true, None);
     let menu = Menu::with_items(&[&quit])?;
@@ -75,9 +84,18 @@ fn run() -> Result<(), Box<dyn Error>> {
     let (results, update_results) = mpsc::channel();
     let main_thread = unsafe { GetCurrentThreadId() };
     update::spawn_checker(results, move || {
-        // Only wakes the loop below; if the post is lost, the next message drains the result.
+        // Only wakes the message loop; if the post is lost, the next message drains the result.
         let _ = unsafe { PostThreadMessageW(main_thread, WM_APP, WPARAM(0), LPARAM(0)) };
     });
+    message_loop(&menu, &update, &tray, &update_results)
+}
+
+fn message_loop(
+    menu: &Menu,
+    update: &MenuItem,
+    tray: &TrayIcon,
+    update_results: &mpsc::Receiver<Outcome>,
+) -> Result<(), Box<dyn Error>> {
     let mut update_shown = false;
     let mut message = MSG::default();
     loop {
@@ -91,12 +109,19 @@ fn run() -> Result<(), Box<dyn Error>> {
         }
         // Drained on every message: a thread message posted while the menu is open never arrives here.
         for result in update_results.try_iter() {
-            update_shown = show_update(&menu, &update, &tray, update_shown, result)?;
+            match show_update(menu, update, tray, update_shown, result) {
+                Ok(shown) => update_shown = shown,
+                // The update notice is not worth stopping keydock for.
+                Err(error) => {
+                    show_error(&format!("keydock could not show the update check: {error}"))
+                }
+            }
         }
     }
 }
 
 /// Puts the result of an update check in the menu and tooltip; returns whether the item is shown.
+/// The menu change comes last, so an error leaves `shown` true to the menu.
 fn show_update(
     menu: &Menu,
     item: &MenuItem,
@@ -106,10 +131,10 @@ fn show_update(
 ) -> Result<bool, Box<dyn Error>> {
     let (text, enabled, tooltip) = match result {
         Outcome::UpToDate => {
+            tray.set_tooltip(Some(TOOLTIP))?;
             if shown {
                 menu.remove(item)?;
             }
-            tray.set_tooltip(Some(TOOLTIP))?;
             return Ok(false);
         }
         Outcome::Available(tag) => (
@@ -123,12 +148,12 @@ fn show_update(
             TOOLTIP.to_string(),
         ),
     };
+    tray.set_tooltip(Some(tooltip))?;
     item.set_text(text);
     item.set_enabled(enabled);
     if !shown {
         menu.insert(item, 0)?;
     }
-    tray.set_tooltip(Some(tooltip))?;
     Ok(true)
 }
 
@@ -144,8 +169,7 @@ fn open_releases_page() {
         )
     };
     if result.0 as isize <= SHELL_EXECUTE_MAX_ERROR {
-        let message = HSTRING::from(format!("keydock could not open {}", update::RELEASES_PAGE));
-        unsafe { MessageBoxW(None, &message, w!("keydock"), MB_ICONERROR) };
+        show_error(&format!("keydock could not open {}", update::RELEASES_PAGE));
     }
 }
 
