@@ -1,5 +1,8 @@
 #![windows_subsystem = "windows"]
 
+#[cfg(not(windows))]
+compile_error!("keydock supports Windows only");
+
 use std::{error::Error, io, process::ExitCode};
 use tray_icon::{
     Icon, TrayIconBuilder,

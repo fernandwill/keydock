@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 
-[target.'cfg(windows)'.dependencies]
-tray-icon = { version = "0.26", default-features = false }
-windows = { version = "0.62", features = ["Win32_UI_WindowsAndMessaging"] }
+[dependencies]
+# Exact pin: tests/tray_quit.py relies on this release's private window class and callback message.
+tray-icon = { version = "=0.26.1", default-features = false }
+windows = { version = "0.62", features = [
+    "Win32_UI_WindowsAndMessaging",
+] }
