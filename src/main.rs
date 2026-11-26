@@ -3,12 +3,13 @@
 #[cfg(not(windows))]
 compile_error!("keydock supports Windows only");
 
+mod interception;
 mod update;
 
 use std::{error::Error, io, process::ExitCode, sync::mpsc};
 use tray_icon::{
     Icon, TrayIcon, TrayIconBuilder,
-    menu::{Menu, MenuEvent, MenuItem},
+    menu::{Menu, MenuEvent, MenuItem, PredefinedMenuItem, Submenu},
 };
 use update::Outcome;
 use windows::{
@@ -62,7 +63,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
     let quit = MenuItem::new("Quit", true, None);
     let update = MenuItem::new("", true, None);
-    let menu = Menu::with_items(&[&quit])?;
+    let menu = Menu::new();
+    append_keyboards(&menu)?;
+    menu.append_items(&[&PredefinedMenuItem::separator(), &quit])?;
     let quit_id = quit.id().clone();
     let update_id = update.id().clone();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
@@ -88,6 +91,36 @@ fn run() -> Result<(), Box<dyn Error>> {
         let _ = unsafe { PostThreadMessageW(main_thread, WM_APP, WPARAM(0), LPARAM(0)) };
     });
     message_loop(&menu, &update, &tray, &update_results)
+}
+
+/// Read-only list of keyboards from the driver; keydock does not block anything yet.
+fn append_keyboards(menu: &Menu) -> Result<(), Box<dyn Error>> {
+    let ids = match interception::scan() {
+        Ok(ids) => ids,
+        Err(error) => {
+            let text = interception::menu_text(&format!("Keyboards: {error}"));
+            return Ok(menu.append(&MenuItem::new(text, false, None))?);
+        }
+    };
+    let builtin = interception::find_builtin(&ids);
+    let keyboards = Submenu::new("Keyboards", true);
+    for (index, id) in ids.iter().enumerate() {
+        let mark = if builtin == Some(index) {
+            " (built-in)"
+        } else {
+            ""
+        };
+        let text = format!("{}{mark}", interception::menu_text(id));
+        keyboards.append(&MenuItem::new(text, false, None))?;
+    }
+    if builtin.is_none() {
+        keyboards.append(&MenuItem::new(
+            "No single built-in keyboard found",
+            false,
+            None,
+        ))?;
+    }
+    Ok(menu.append(&keyboards)?)
 }
 
 fn message_loop(

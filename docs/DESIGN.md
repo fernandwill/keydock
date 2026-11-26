@@ -40,7 +40,8 @@ If the driver is missing at startup, keydock stays inactive and shows an error t
 
 - keydock blocks only the built-in keyboard, never "every keyboard not on the allowlist".
 - keydock detects the built-in keyboard from its hardware ID (`ACPI\...` for PS/2/i8042, or an I2C HID ID). The user can override the choice in the tray menu.
-- If keydock cannot find a built-in keyboard, it stays inactive and shows an error toast.
+- keydock treats a keyboard as built-in only when exactly one keyboard matches the rule. With no match or several matches it finds no built-in keyboard.
+- If keydock cannot find a built-in keyboard, it stays inactive and shows an error toast. Until toasts exist, the tray menu shows the error as a disabled item.
 
 ### Connect and disconnect
 
@@ -99,6 +100,7 @@ A user must never be left with no working keyboard.
 These are facts to verify during the build, not open decisions:
 
 - Does the Interception client need admin rights? Autostart through the Run key assumes it does not. If it does, autostart needs a Task Scheduler task instead.
+  - Answered: no. A non-elevated keydock creates the context and reads every hardware ID (`src/interception.rs`). Setting a filter to block keys is not tested yet.
 - Is the reported 10-device-slot exhaustion after many hot-plug cycles still present? If yes, document it in the README.
 - What is the built-in keyboard's hardware ID on the development laptop? This confirms the auto-detection rule.
   - Answered: the built-in keyboard is a PS/2 device with an `ACPI\` hardware ID, so the rule matches it. The same laptop also lists a receiver dongle, a vendor's virtual keyboard, and an internal USB controller (`HID\VID_048D`, likely the backlight) as keyboards. The rule correctly skips the internal controller, and the allowlist keeps all three from triggering a block.

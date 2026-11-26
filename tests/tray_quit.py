@@ -120,14 +120,18 @@ def check_quit(binary):
         menu = c.c_size_t()
         if not user32.SendMessageTimeoutW(popup, MN_GETHMENU, 0, 0, 0, TIMEOUT * 1000, c.byref(menu)):
             raise RuntimeError("Popup did not return its menu handle")
+        hmenu = w.HMENU(menu.value)
         label = c.create_unicode_buffer(128)
-        user32.GetMenuStringW(w.HMENU(menu.value), 0, label, len(label), MF_BYPOSITION)
-        if label.value != "Quit":
-            raise RuntimeError(f"Expected Quit as the first item, found {label.value!r}")
+        labels = []
+        for position in range(user32.GetMenuItemCount(hmenu)):
+            user32.GetMenuStringW(hmenu, position, label, len(label), MF_BYPOSITION)
+            labels.append(label.value)
+        if "Quit" not in labels:
+            raise RuntimeError(f"No Quit item in the menu, found {labels!r}")
         # Replay a click: close the menu, then send its command. Posted keystrokes are unreliable
         # because the menu can drop them when keydock is not foreground, and a command that arrives
         # while the menu is open loses the quit inside the menu loop.
-        quit_id = user32.GetMenuItemID(w.HMENU(menu.value), 0)
+        quit_id = user32.GetMenuItemID(hmenu, labels.index("Quit"))
         if quit_id == -1:
             raise RuntimeError("Quit has no command id")
         post(tray, WM_CANCELMODE, 0, 0)
