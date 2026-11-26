@@ -25,4 +25,10 @@ Quit any running keydock first. The check holds a lock that keydock cannot open,
 
 ## Driver
 
-No driver is required for this version. The [v1 design](docs/DESIGN.md) calls for the [Interception](https://github.com/oblitum/Interception) driver, which is free for non-commercial use only. Its user-mode library is LGPL. Neither is bundled here.
+This version does not use a driver yet. The [v1 design](docs/DESIGN.md) uses the [Interception](https://github.com/oblitum/Interception) driver by Francisco Lopes. Its driver and installer are free for non-commercial use only, and its user-mode library is LGPL 3.0. Commercial use needs a license from the author.
+
+The release zip bundles Interception 1.0.1: `interception.dll`, `install-interception.exe`, and the LGPL and GPL texts. To install the driver, open a terminal as administrator in the unzipped folder, run `install-interception.exe /install`, and restart Windows. To remove it, run `install-interception.exe /uninstall` and restart. The repository itself contains no Interception files.
+
+## Release
+
+Set `version` in `Cargo.toml`, commit, then push a matching tag (for example `v0.2.0`). The `release` workflow checks that the tag matches the version, builds keydock, runs `scripts/package-release.sh` to download Interception at a pinned SHA-256, and publishes `keydock-<tag>-x64.zip` as a GitHub release. To build the zip locally, run `cargo build --release --locked` and then `bash scripts/package-release.sh v0.1.0`.

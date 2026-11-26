@@ -22,9 +22,11 @@ Rejected options:
 
 ### Driver install
 
-The user installs Interception once, with its own installer (admin rights and a reboot). keydock does not bundle or redistribute it.
+The release zip bundles Interception 1.0.1: the x64 `interception.dll`, `install-interception.exe`, and the license texts. The user runs the installer once (admin rights and a reboot). The free license does not allow a silent install embedded in keydock's own installer, so keydock never runs it on its own.
 
-If the driver is missing at startup, keydock stays inactive and shows an error toast with a link to the Interception releases page.
+The Interception non-commercial license allows redistributing the driver and installer "once communication with drivers happen solely by use of the library and its API". keydock therefore talks to the driver only through `interception.dll`, never through direct device I/O.
+
+If the driver is missing at startup, keydock stays inactive and shows an error toast that points to `install-interception.exe` in keydock's folder.
 
 ## Devices
 
@@ -73,14 +75,16 @@ A user must never be left with no working keyboard.
 
 ## Release
 
-- Portable `keydock.exe` attached to GitHub Releases.
-- A GitHub Actions workflow builds it when a version tag is pushed.
+- A portable zip attached to GitHub Releases: `keydock.exe`, the bundled Interception files, `NOTICE.txt`, and the LGPL and GPL texts.
+- The `release` workflow builds it when a `v*` tag is pushed and fails if the tag does not match the `Cargo.toml` version.
+- `scripts/package-release.sh` downloads Interception and the GPL text at pinned URLs and checks their SHA-256 before packaging. The repository holds no third-party binaries.
 - winget or MSI: not in v1.
 
 ## License
 
 - keydock: MIT.
-- Interception: its user-mode library is LGPL; its driver is free for non-commercial use only. keydock loads the Interception DLL dynamically and does not vendor its source. The README must state the driver terms.
+- Interception: its user-mode library is LGPL 3.0; its driver and installer are free for non-commercial use only. keydock loads the DLL at run time, so users can replace it (LGPL section 4). Each release carries `NOTICE.txt` plus the LGPL and GPL texts. The README must state the driver terms.
+- Bundling makes any redistribution of the release zip subject to Interception's non-commercial terms. Commercial use needs a license from the author.
 
 ## Open checks
 
