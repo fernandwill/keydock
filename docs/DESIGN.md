@@ -89,3 +89,4 @@ These are facts to verify during the build, not open decisions:
 - Does the Interception client need admin rights? Autostart through the Run key assumes it does not. If it does, autostart needs a Task Scheduler task instead.
 - Is the reported 10-device-slot exhaustion after many hot-plug cycles still present? If yes, document it in the README.
 - What is the built-in keyboard's hardware ID on the development laptop? This confirms the auto-detection rule.
+  - Answered: the built-in keyboard is a PS/2 device with an `ACPI\` hardware ID, so the rule matches it. The same laptop also lists a receiver dongle, a vendor's virtual keyboard, and an internal USB controller (`HID\VID_048D`, likely the backlight) as keyboards. The rule correctly skips the internal controller, and the allowlist keeps all three from triggering a block.
