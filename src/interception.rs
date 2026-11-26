@@ -25,7 +25,7 @@ const HARDWARE_ID_UNITS: usize = 512;
 const FILTER_NONE: u16 = 0x0000;
 const FILTER_KEY_ALL: u16 = 0xFFFF;
 const KEY_UP: u16 = 0x01;
-// How long the input thread waits for a key before it checks for a new device set.
+// While blocking, how long the input thread waits for a key before it checks for a new device set.
 const POLL_MS: u32 = 50;
 
 type Proc = unsafe extern "system" fn() -> isize;
@@ -243,9 +243,17 @@ pub struct Blocker {
 
 impl Blocker {
     /// First clears any filter left on `built_in`, so keydock always starts with it working.
-    pub fn spawn(driver: Driver, built_in: Devices) -> Self {
+    /// `stopped` runs when the thread ends, also after a panic.
+    pub fn spawn(
+        driver: Driver,
+        built_in: Devices,
+        stopped: impl Fn() + std::marker::Send + 'static,
+    ) -> Self {
         let (devices, requests) = mpsc::channel();
-        let thread = thread::spawn(move || block_loop(&driver, built_in, &requests));
+        let thread = thread::spawn(move || {
+            let _stopped = OnDrop(stopped);
+            block_loop(&driver, built_in, &requests);
+        });
         Self {
             devices: Some(devices),
             thread: Some(thread),
@@ -257,6 +265,18 @@ impl Blocker {
             // Fails only if the thread panicked; its driver closed then, which cleared the filters.
             let _ = sender.send(devices);
         }
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.thread.as_ref().is_none_or(JoinHandle::is_finished)
+    }
+}
+
+struct OnDrop<F: Fn()>(F);
+
+impl<F: Fn()> Drop for OnDrop<F> {
+    fn drop(&mut self) {
+        (self.0)();
     }
 }
 
@@ -275,19 +295,25 @@ fn block_loop(driver: &Driver, built_in: Devices, requests: &Receiver<Devices>) 
     driver.set_filter(built_in, FILTER_NONE);
     let mut blocked: Devices = 0;
     loop {
-        loop {
-            match requests.try_recv() {
-                Ok(devices) => {
-                    driver.set_filter(blocked & !devices, FILTER_NONE);
-                    driver.set_filter(devices, FILTER_KEY_ALL);
-                    blocked = devices;
-                }
-                Err(TryRecvError::Empty) => break,
-                Err(TryRecvError::Disconnected) => {
-                    driver.set_filter(blocked, FILTER_NONE);
-                    return;
-                }
+        // With nothing filtered no key can arrive, so the thread sleeps until the next request.
+        // While blocking it must poll: the driver's wait cannot be woken by a request.
+        let request = if blocked == 0 {
+            requests.recv().map_err(|_| TryRecvError::Disconnected)
+        } else {
+            requests.try_recv()
+        };
+        match request {
+            Ok(devices) => {
+                driver.set_filter(blocked & !devices, FILTER_NONE);
+                driver.set_filter(devices, FILTER_KEY_ALL);
+                blocked = devices;
+                continue;
             }
+            Err(TryRecvError::Disconnected) => {
+                driver.set_filter(blocked, FILTER_NONE);
+                return;
+            }
+            Err(TryRecvError::Empty) => {}
         }
         let Some(device) = driver.wait() else {
             continue;

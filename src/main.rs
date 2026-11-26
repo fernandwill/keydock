@@ -76,27 +76,77 @@ fn run() -> Result<(), Box<dyn Error>> {
         Ok(driver) => (Ok(driver.keyboards()), Some(driver)),
         Err(error) => (Err(error), None),
     };
+    let (menu, found, items) = build_menu(config_error, &keyboards, &settings.config)?;
+    let (tray, menu_events) = build_tray(&menu)?;
+    let main_thread = unsafe { GetCurrentThreadId() };
+    // Spawned before the first refresh: the thread clears any filter left on the built-in
+    // keyboard before it reads the first device set.
+    let blocker =
+        driver.map(|driver| Blocker::spawn(driver, found.built_in, move || wake(main_thread)));
+    let mut app = App {
+        policy: Policy {
+            paused: settings.config.paused,
+            ..Policy::default()
+        },
+        menu,
+        tray,
+        update: MenuItem::new("", true, None),
+        update_shown: false,
+        update_note: None,
+        pause: items.pause,
+        reenable: items.reenable,
+        quit_id: items.quit.id().clone(),
+        found,
+        settings,
+        blocker,
+    };
+    app.policy.set_triggered(app.triggered());
+    app.refresh()?;
+
+    let (results, update_results) = mpsc::channel();
+    update::spawn_checker(results, move || wake(main_thread));
+    app.message_loop(&update_results, &menu_events)
+}
+
+/// Wakes the message loop. If the post is lost, the next message does the same job.
+fn wake(main_thread: u32) {
+    let _ = unsafe { PostThreadMessageW(main_thread, WM_APP, WPARAM(0), LPARAM(0)) };
+}
+
+struct MenuItems {
+    pause: CheckMenuItem,
+    reenable: MenuItem,
+    quit: MenuItem,
+}
+
+fn build_menu(
+    config_error: Option<String>,
+    keyboards: &Result<Vec<Keyboard>, ScanError>,
+    config: &Config,
+) -> Result<(Menu, Found, MenuItems), Box<dyn Error>> {
     let menu = Menu::new();
     if let Some(error) = config_error {
         menu.append(&disabled(&error))?;
     }
-    let found = append_keyboards(
-        &menu,
-        &keyboards,
-        &devices::internal_keyboards(),
-        &settings.config,
-    )?;
-    let pause = CheckMenuItem::new("Pause keydock", true, settings.config.paused, None);
-    // Always enabled: muda disables items without graying them, so a disabled item looks clickable.
-    let reenable = MenuItem::new("Re-enable until next connect", true, None);
-    let quit = MenuItem::new("Quit", true, None);
+    let found = append_keyboards(&menu, keyboards, &devices::internal_keyboards(), config)?;
+    let items = MenuItems {
+        pause: CheckMenuItem::new("Pause keydock", true, config.paused, None),
+        // Always enabled: muda disables items without graying them, so a disabled item looks clickable.
+        reenable: MenuItem::new("Re-enable until next connect", true, None),
+        quit: MenuItem::new("Quit", true, None),
+    };
     menu.append_items(&[
         &PredefinedMenuItem::separator(),
-        &pause,
-        &reenable,
+        &items.pause,
+        &items.reenable,
         &PredefinedMenuItem::separator(),
-        &quit,
+        &items.quit,
     ])?;
+    Ok((menu, found, items))
+}
+
+/// Builds the tray icon; the receiver gets the ID of each clicked menu item.
+fn build_tray(menu: &Menu) -> Result<(TrayIcon, mpsc::Receiver<MenuId>), Box<dyn Error>> {
     let (clicks, menu_events) = mpsc::channel();
     MenuEvent::set_event_handler(Some(move |event: MenuEvent| {
         // The native menu dispatches its command on the message-loop thread, which drains this
@@ -110,36 +160,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         .with_icon(keyboard_icon()?)
         .with_menu(Box::new(menu.clone()))
         .build()?;
-    // Spawned before the first refresh: the thread clears any filter left on the built-in
-    // keyboard before it reads the first device set.
-    let blocker = driver.map(|driver| Blocker::spawn(driver, found.built_in));
-    let mut app = App {
-        policy: Policy {
-            paused: settings.config.paused,
-            ..Policy::default()
-        },
-        menu,
-        tray,
-        update: MenuItem::new("", true, None),
-        update_shown: false,
-        update_note: None,
-        pause,
-        reenable,
-        quit_id: quit.id().clone(),
-        found,
-        settings,
-        blocker,
-    };
-    app.policy.set_triggered(app.triggered());
-    app.refresh()?;
-
-    let (results, update_results) = mpsc::channel();
-    let main_thread = unsafe { GetCurrentThreadId() };
-    update::spawn_checker(results, move || {
-        // Only wakes the message loop; if the post is lost, the next message drains the result.
-        let _ = unsafe { PostThreadMessageW(main_thread, WM_APP, WPARAM(0), LPARAM(0)) };
-    });
-    app.message_loop(&update_results, &menu_events)
+    Ok((tray, menu_events))
 }
 
 struct Settings {
@@ -408,6 +429,18 @@ impl App {
                     }
                 }
             }
+            if self.blocker.as_ref().is_some_and(Blocker::stopped) {
+                // Dropping joins the finished thread. Its driver connection closed, which
+                // cleared the filters, so the built-in keyboard already works.
+                self.blocker = None;
+                show_error(
+                    "keydock's input thread stopped, so the built-in keyboard is no longer \
+                     blocked. Restart keydock to block it again.",
+                );
+                if let Err(error) = self.refresh() {
+                    show_error(&format!("keydock could not update its state: {error}"));
+                }
+            }
         }
     }
 
@@ -423,19 +456,20 @@ impl App {
             }
             Outcome::Available(tag) => {
                 self.update_note = Some(format!("update {tag} available"));
-                self.show_update_item(format!("Update available: {tag}"), true)?;
+                self.show_update_item(format!("Update available: {tag}"))?;
             }
             Outcome::Failed(reason) => {
                 self.update_note = None;
-                self.show_update_item(format!("Update check failed: {reason}"), false)?;
+                // Clickable like the available notice: muda cannot gray an item it disables.
+                self.show_update_item(format!("Update check failed: {reason}"))?;
             }
         }
         self.refresh()
     }
 
-    fn show_update_item(&mut self, text: String, enabled: bool) -> Result<(), Box<dyn Error>> {
+    /// The item opens the release page when clicked.
+    fn show_update_item(&mut self, text: String) -> Result<(), Box<dyn Error>> {
         self.update.set_text(text);
-        self.update.set_enabled(enabled);
         if !self.update_shown {
             self.menu.insert(&self.update, 0)?;
             self.update_shown = true;

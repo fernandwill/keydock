@@ -14,7 +14,7 @@ Look for the keyboard icon in the Windows notification area (check hidden icons 
 
 ## Update notice
 
-About 60 seconds after it starts, and then every 24 hours, keydock asks GitHub for the latest release of this repository (`api.github.com/repos/<owner>/keydock/releases/latest`, User-Agent `keydock/<version>`). It sends nothing else. If the release is newer than the running version, the tray menu shows **Update available: vX.Y.Z**, which opens the release page, and the tooltip says so too. If the check fails, the menu shows a disabled **Update check failed** item with the reason. keydock never downloads or installs anything itself.
+About 60 seconds after it starts, and then every 24 hours, keydock asks GitHub for the latest release of this repository (`api.github.com/repos/<owner>/keydock/releases/latest`, User-Agent `keydock/<version>`). It sends nothing else. If the release is newer than the running version, the tray menu shows **Update available: vX.Y.Z**, which opens the release page, and the tooltip says so too. If the check fails, the menu shows an **Update check failed** item with the reason, which also opens the release page. keydock never downloads or installs anything itself.
 
 ## Check the Quit action
 
