@@ -10,16 +10,22 @@ import time
 user32 = c.WinDLL("user32", use_last_error=True)
 kernel32 = c.WinDLL("kernel32", use_last_error=True)
 advapi32 = c.WinDLL("advapi32", use_last_error=True)
+shell32 = c.WinDLL("shell32")
 kernel32.CreateMutexW.restype = w.HANDLE
+shell32.Shell_NotifyIconGetRect.restype = c.c_long
 TIMEOUT = 5
-# tray-icon 0.26 uses this private window class and shell callback message.
+# tray-icon 0.26 uses this private window class, shell callback message and icon id
+# (one counter gives the public id 1 and the internal id 2).
 TRAY_CLASS = "tray_icon_app"
 TRAY_CALLBACK = 6002
+TRAY_ICON_ID = 2
+WM_NULL = 0x0000
 WM_RBUTTONUP = 0x0205
 WM_CANCELMODE = 0x001F
 WM_COMMAND = 0x0111
 MN_GETHMENU = 0x01E1
 MF_BYPOSITION = 0x0400
+SMTO_ABORTIFHUNG = 0x0002
 MUTEX_NAME = r"Local\keydock"
 ERROR_ALREADY_EXISTS = 183
 SDDL_REVISION_1 = 1
@@ -27,6 +33,10 @@ SDDL_REVISION_1 = 1
 
 class SECURITY_ATTRIBUTES(c.Structure):
     _fields_ = [("nLength", w.DWORD), ("lpSecurityDescriptor", w.LPVOID), ("bInheritHandle", w.BOOL)]
+
+
+class NOTIFYICONIDENTIFIER(c.Structure):
+    _fields_ = [("cbSize", w.DWORD), ("hWnd", w.HWND), ("uID", w.UINT), ("guidItem", c.c_ubyte * 16)]
 
 
 def window(process, class_name):
@@ -47,6 +57,21 @@ def window(process, class_name):
 def post(hwnd, message, key, data):
     if not user32.PostMessageW(hwnd, message, key, data):
         raise c.WinError(c.get_last_error())
+
+
+def menu_diagnosis(tray):
+    # tray-icon skips the menu without an error when GetCursorPos or Shell_NotifyIconGetRect fails.
+    icon = NOTIFYICONIDENTIFIER(c.sizeof(NOTIFYICONIDENTIFIER), tray, TRAY_ICON_ID)
+    rect_result = shell32.Shell_NotifyIconGetRect(c.byref(icon), c.byref(w.RECT())) & 0xFFFFFFFF
+    cursor_ok = bool(user32.GetCursorPos(c.byref(w.POINT())))
+    reply = c.c_size_t()
+    answers = bool(user32.SendMessageTimeoutW(tray, WM_NULL, 0, 0, SMTO_ABORTIFHUNG, TIMEOUT * 1000, c.byref(reply)))
+    foreground = c.create_unicode_buffer(64)
+    user32.GetClassNameW(user32.GetForegroundWindow(), foreground, len(foreground))
+    return (
+        f"Shell_NotifyIconGetRect={rect_result:#010x}, GetCursorPos ok={cursor_ok},"
+        f" keydock answers messages={answers}, foreground window class={foreground.value!r}"
+    )
 
 
 def check_exits_quietly(binary, situation):
@@ -88,7 +113,10 @@ def check_quit(binary):
         tray = window(process, TRAY_CLASS)
         check_exits_quietly(binary, "next to the first")
         post(tray, TRAY_CALLBACK, 0, WM_RBUTTONUP)
-        popup = window(process, "#32768")
+        try:
+            popup = window(process, "#32768")
+        except TimeoutError:
+            raise RuntimeError(f"The tray menu did not open. {menu_diagnosis(tray)}") from None
         menu = c.c_size_t()
         if not user32.SendMessageTimeoutW(popup, MN_GETHMENU, 0, 0, 0, TIMEOUT * 1000, c.byref(menu)):
             raise RuntimeError("Popup did not return its menu handle")
