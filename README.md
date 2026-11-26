@@ -1,6 +1,6 @@
 # keydock
 
-keydock is a planned Windows 10 and 11 x64 tray app that blocks a laptop's built-in keyboard while an allowlisted external keyboard is connected. For now it runs in the notification area without changing keyboard input.
+keydock is a Windows 10 and 11 x64 tray app that blocks a laptop's built-in keyboard while an allowlisted external keyboard is connected. For now it checks which keyboards are connected only when it starts: after you plug a keyboard in or out, restart keydock.
 
 ## Run keydock
 
@@ -10,7 +10,7 @@ With a current stable Rust toolchain installed, run this command from the reposi
 cargo run
 ```
 
-Look for the keyboard icon in the Windows notification area (check hidden icons if necessary). Hover over it to see `keydock: inactive`. Right-click to see the **Keyboards** submenu. It lists the connected keyboards by hardware ID and marks the built-in one `(built-in)`. Devices that Windows counts as part of the PC, such as a keyboard backlight controller, are marked `(internal)` and cannot be checked. Each external keyboard model has a checkbox labeled with its VID:PID; check the keyboards that should trigger the block (blocking is not built yet). keydock saves the checked list to `%APPDATA%\keydock\config.toml` when you click. If that file cannot be read, the menu says so and keydock does not overwrite it. If the Interception DLL or driver is missing, one disabled item says so instead of the submenu. Choose **Quit** to exit. There is no application window. Only one keydock runs per Windows session: if keydock is already running, a second start exits at once with no message.
+Look for the keyboard icon in the Windows notification area (check hidden icons if necessary). Hover over it to see its state: `keydock: blocking the built-in keyboard`, `keydock: inactive`, `keydock: paused`, or `keydock: built-in keyboard on until the next connect`. Right-click to see the **Keyboards** submenu. It lists the connected keyboards by hardware ID. Every keyboard that Windows counts as part of the PC is marked `(built-in)` and cannot be checked; keydock blocks all of them. Each external keyboard model has a checkbox labeled with its VID:PID; check the keyboards that should trigger the block. The block starts or stops at once when you click. keydock saves the checked list to `%APPDATA%\keydock\config.toml` when you click. If that file cannot be read, the menu says so and keydock does not overwrite it. If the Interception DLL or driver is missing, one disabled item says so instead of the submenu. **Pause keydock** keeps the built-in keyboard on until you click it again, also after a restart. **Re-enable until next connect** turns the built-in keyboard on until an allowlisted keyboard is plugged in again (for now, until keydock restarts). Choose **Quit** to exit; the built-in keyboard works again at once, and also if keydock crashes or is killed. There is no application window. Only one keydock runs per Windows session: if keydock is already running, a second start exits at once with no message.
 
 ## Update notice
 
@@ -29,7 +29,7 @@ Quit any running keydock first. The check holds a lock that keydock cannot open,
 
 ## Driver
 
-keydock reads the keyboard list through the Interception driver but does not block any keys yet. It loads `interception.dll` only from its own folder. For `cargo run`, copy the x64 `interception.dll` (from the release zip, or `library/x64` in Interception's `Interception.zip`) to `target\debug\`. The [v1 design](docs/DESIGN.md) uses the [Interception](https://github.com/oblitum/Interception) driver by Francisco Lopes. Its driver and installer are free for non-commercial use only, and its user-mode library is LGPL 3.0. Commercial use needs a license from the author.
+keydock reads the keyboard list and blocks keys through the Interception driver. It loads `interception.dll` only from its own folder. For `cargo run`, copy the x64 `interception.dll` (from the release zip, or `library/x64` in Interception's `Interception.zip`) to `target\debug\`. The [v1 design](docs/DESIGN.md) uses the [Interception](https://github.com/oblitum/Interception) driver by Francisco Lopes. Its driver and installer are free for non-commercial use only, and its user-mode library is LGPL 3.0. Commercial use needs a license from the author.
 
 The release zip bundles Interception 1.0.1: `interception.dll`, `install-interception.exe`, and the LGPL and GPL texts. To install the driver, open a terminal as administrator in the unzipped folder, run `install-interception.exe /install`, and restart Windows. To remove it, run `install-interception.exe /uninstall` and restart. The repository itself contains no Interception files.
 

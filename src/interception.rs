@@ -1,4 +1,13 @@
-use std::{ffi::c_void, fmt};
+use std::{
+    collections::HashSet,
+    ffi::c_void,
+    fmt,
+    sync::{
+        atomic::{AtomicU32, Ordering},
+        mpsc::{self, Receiver, Sender, TryRecvError},
+    },
+    thread::{self, JoinHandle},
+};
 use windows::{
     Win32::{
         Foundation::{ERROR_MOD_NOT_FOUND, FreeLibrary, HMODULE},
@@ -13,11 +22,47 @@ use windows::{
 const KEYBOARD_DEVICES: std::ops::RangeInclusive<i32> = 1..=10;
 // Interception's own samples use 500 wide characters for a hardware ID.
 const HARDWARE_ID_UNITS: usize = 512;
+const FILTER_NONE: u16 = 0x0000;
+const FILTER_KEY_ALL: u16 = 0xFFFF;
+const KEY_UP: u16 = 0x01;
+// How long the input thread waits for a key before it checks for a new device set.
+const POLL_MS: u32 = 50;
 
 type Proc = unsafe extern "system" fn() -> isize;
 type CreateContext = unsafe extern "C" fn() -> *mut c_void;
 type DestroyContext = unsafe extern "C" fn(*mut c_void);
 type GetHardwareId = unsafe extern "C" fn(*mut c_void, i32, *mut c_void, u32) -> u32;
+type Predicate = extern "C" fn(i32) -> i32;
+type SetFilter = unsafe extern "C" fn(*mut c_void, Predicate, u16);
+type Wait = unsafe extern "C" fn(*mut c_void, u32) -> i32;
+type Receive = unsafe extern "C" fn(*mut c_void, i32, *mut KeyStroke, u32) -> i32;
+type Send = unsafe extern "C" fn(*mut c_void, i32, *const KeyStroke, u32) -> i32;
+
+/// A set of Interception devices: bit n stands for device n.
+pub type Devices = u32;
+
+pub fn device_bit(device: i32) -> Devices {
+    1 << device
+}
+
+// interception_set_filter's predicate takes no user data, so the device set travels in a static.
+// Only the input thread sets filters, so nothing races on it.
+static FILTER_DEVICES: AtomicU32 = AtomicU32::new(0);
+
+extern "C" fn in_filter_devices(device: i32) -> i32 {
+    KEYBOARD_DEVICES.contains(&device) as i32
+        & (FILTER_DEVICES.load(Ordering::Relaxed) >> device) as i32
+        & 1
+}
+
+/// Interception's InterceptionKeyStroke.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct KeyStroke {
+    code: u16,
+    state: u16,
+    information: u32,
+}
 
 pub enum ScanError {
     Load(Error),
@@ -50,7 +95,15 @@ impl Drop for Library {
     }
 }
 
-/// Closed when dropped, also on a panic, so its 20 device handles and events never leak.
+impl Library {
+    /// `name` must end with a NUL.
+    fn function(&self, name: &'static str) -> Result<Proc, ScanError> {
+        unsafe { GetProcAddress(self.0, PCSTR(name.as_ptr())) }
+            .ok_or(ScanError::MissingFunction(name.trim_end_matches('\0')))
+    }
+}
+
+/// Closed when dropped, also on a panic. Closing it also clears every filter it set.
 struct Context {
     raw: *mut c_void,
     destroy: DestroyContext,
@@ -62,65 +115,192 @@ impl Drop for Context {
     }
 }
 
-impl Library {
-    /// `name` must end with a NUL.
-    fn function(&self, name: &'static str) -> Result<Proc, ScanError> {
-        unsafe { GetProcAddress(self.0, PCSTR(name.as_ptr())) }
-            .ok_or(ScanError::MissingFunction(name.trim_end_matches('\0')))
+pub struct Keyboard {
+    pub device: i32,
+    /// The first hardware ID.
+    pub id: String,
+}
+
+/// keydock's only connection to the driver. Each connection registers its own wake-up events,
+/// so a second one could take keys meant for the first.
+pub struct Driver {
+    // Fields drop in order: the context closes before the DLL unloads.
+    context: Context,
+    _library: Library,
+    get_hardware_id: GetHardwareId,
+    set_filter: SetFilter,
+    wait: Wait,
+    receive: Receive,
+    send: Send,
+}
+
+// Safe: the context is a heap block of handles that any thread may use, and keydock uses a Driver
+// from one thread at a time (the main thread for the scan, then only the input thread).
+unsafe impl std::marker::Send for Driver {}
+
+impl Driver {
+    pub fn open() -> Result<Self, ScanError> {
+        // Only keydock's own folder: the current folder and PATH could hold a planted DLL.
+        let library = Library(
+            unsafe {
+                LoadLibraryExW(
+                    w!("interception.dll"),
+                    None,
+                    LOAD_LIBRARY_SEARCH_APPLICATION_DIR,
+                )
+            }
+            .map_err(ScanError::Load)?,
+        );
+        // Safe: these are the Interception 1.0.1 signatures (x64 has a single calling convention).
+        // The DLL exports no version, and the LGPL lets users swap the file, so a hash pin is not allowed.
+        unsafe {
+            let create = std::mem::transmute::<Proc, CreateContext>(
+                library.function("interception_create_context\0")?,
+            );
+            let destroy = std::mem::transmute::<Proc, DestroyContext>(
+                library.function("interception_destroy_context\0")?,
+            );
+            let get_hardware_id = std::mem::transmute::<Proc, GetHardwareId>(
+                library.function("interception_get_hardware_id\0")?,
+            );
+            let set_filter = std::mem::transmute::<Proc, SetFilter>(
+                library.function("interception_set_filter\0")?,
+            );
+            let wait = std::mem::transmute::<Proc, Wait>(
+                library.function("interception_wait_with_timeout\0")?,
+            );
+            let receive =
+                std::mem::transmute::<Proc, Receive>(library.function("interception_receive\0")?);
+            let send = std::mem::transmute::<Proc, Send>(library.function("interception_send\0")?);
+            let raw = create();
+            if raw.is_null() {
+                return Err(ScanError::DriverUnavailable);
+            }
+            Ok(Self {
+                context: Context { raw, destroy },
+                _library: library,
+                get_hardware_id,
+                set_filter,
+                wait,
+                receive,
+                send,
+            })
+        }
+    }
+
+    /// Every connected keyboard. Changes no filter, so input is unchanged.
+    pub fn keyboards(&self) -> Vec<Keyboard> {
+        let mut keyboards = Vec::new();
+        let mut buffer = [0u16; HARDWARE_ID_UNITS];
+        for device in KEYBOARD_DEVICES {
+            let bytes = unsafe {
+                (self.get_hardware_id)(
+                    self.context.raw,
+                    device,
+                    buffer.as_mut_ptr().cast(),
+                    size_of_val(&buffer) as u32,
+                )
+            };
+            // An empty slot or an ID longer than the buffer returns 0 bytes.
+            if let Some(id) = hardware_ids(&buffer, bytes).into_iter().next() {
+                keyboards.push(Keyboard { device, id });
+            }
+        }
+        keyboards
+    }
+
+    fn set_filter(&self, devices: Devices, filter: u16) {
+        if devices == 0 {
+            return;
+        }
+        FILTER_DEVICES.store(devices, Ordering::Relaxed);
+        unsafe { (self.set_filter)(self.context.raw, in_filter_devices, filter) };
+    }
+
+    /// The device with a key waiting, or `None` after `POLL_MS`.
+    fn wait(&self) -> Option<i32> {
+        let device = unsafe { (self.wait)(self.context.raw, POLL_MS) };
+        (device > 0).then_some(device)
+    }
+
+    fn receive(&self, device: i32) -> Option<KeyStroke> {
+        let mut stroke = KeyStroke::default();
+        let count = unsafe { (self.receive)(self.context.raw, device, &mut stroke, 1) };
+        (count > 0).then_some(stroke)
+    }
+
+    fn send(&self, device: i32, stroke: &KeyStroke) {
+        // A lost key-up only leaves a key down until it is pressed again; nothing to recover here.
+        unsafe { (self.send)(self.context.raw, device, stroke, 1) };
     }
 }
 
-/// Lists the first hardware ID of every connected keyboard. Sets no filter, so input is unchanged.
-pub fn scan() -> Result<Vec<String>, ScanError> {
-    // Only keydock's own folder: the current folder and PATH could hold a planted DLL.
-    let library = Library(
-        unsafe {
-            LoadLibraryExW(
-                w!("interception.dll"),
-                None,
-                LOAD_LIBRARY_SEARCH_APPLICATION_DIR,
-            )
+/// The input thread. It owns the driver and blocks the devices in the last set it was sent.
+pub struct Blocker {
+    devices: Option<Sender<Devices>>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Blocker {
+    /// First clears any filter left on `built_in`, so keydock always starts with it working.
+    pub fn spawn(driver: Driver, built_in: Devices) -> Self {
+        let (devices, requests) = mpsc::channel();
+        let thread = thread::spawn(move || block_loop(&driver, built_in, &requests));
+        Self {
+            devices: Some(devices),
+            thread: Some(thread),
         }
-        .map_err(ScanError::Load)?,
-    );
-    // Safe: these are the Interception 1.0.1 signatures (x64 has a single calling convention).
-    // The DLL exports no version, and the LGPL lets users swap the file, so a hash pin is not allowed.
-    let (create, destroy, get_hardware_id) = unsafe {
-        (
-            std::mem::transmute::<Proc, CreateContext>(
-                library.function("interception_create_context\0")?,
-            ),
-            std::mem::transmute::<Proc, DestroyContext>(
-                library.function("interception_destroy_context\0")?,
-            ),
-            std::mem::transmute::<Proc, GetHardwareId>(
-                library.function("interception_get_hardware_id\0")?,
-            ),
-        )
-    };
-    let raw = unsafe { create() };
-    if raw.is_null() {
-        return Err(ScanError::DriverUnavailable);
     }
-    // Declared after `library`, so it closes before the DLL unloads.
-    let context = Context { raw, destroy };
-    let mut keyboards = Vec::new();
-    let mut buffer = [0u16; HARDWARE_ID_UNITS];
-    for device in KEYBOARD_DEVICES {
-        let bytes = unsafe {
-            get_hardware_id(
-                context.raw,
-                device,
-                buffer.as_mut_ptr().cast(),
-                size_of_val(&buffer) as u32,
-            )
+
+    pub fn block(&self, devices: Devices) {
+        if let Some(sender) = &self.devices {
+            // Fails only if the thread panicked; its driver closed then, which cleared the filters.
+            let _ = sender.send(devices);
+        }
+    }
+}
+
+impl Drop for Blocker {
+    fn drop(&mut self) {
+        // Closing the channel tells the thread to clear its filters and stop.
+        self.devices = None;
+        if let Some(thread) = self.thread.take() {
+            // A panic in the thread already closed its driver; there is nothing left to undo.
+            let _ = thread.join();
+        }
+    }
+}
+
+fn block_loop(driver: &Driver, built_in: Devices, requests: &Receiver<Devices>) {
+    driver.set_filter(built_in, FILTER_NONE);
+    let mut blocked: Devices = 0;
+    loop {
+        loop {
+            match requests.try_recv() {
+                Ok(devices) => {
+                    driver.set_filter(blocked & !devices, FILTER_NONE);
+                    driver.set_filter(devices, FILTER_KEY_ALL);
+                    blocked = devices;
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    driver.set_filter(blocked, FILTER_NONE);
+                    return;
+                }
+            }
+        }
+        let Some(device) = driver.wait() else {
+            continue;
         };
-        // An empty slot or an ID longer than the buffer returns 0 bytes.
-        if let Some(id) = hardware_ids(&buffer, bytes).into_iter().next() {
-            keyboards.push(id);
+        let Some(stroke) = driver.receive(device) else {
+            continue;
+        };
+        // Key-ups pass, so a key held down when blocking starts is not left down in Windows.
+        // Keys queued before an unblock also pass.
+        if blocked & device_bit(device) == 0 || stroke.state & KEY_UP != 0 {
+            driver.send(device, &stroke);
         }
     }
-    Ok(keyboards)
 }
 
 /// Turns a REG_MULTI_SZ buffer of `bytes` length into its strings.
@@ -133,19 +313,21 @@ pub fn hardware_ids(buffer: &[u16], bytes: u32) -> Vec<String> {
         .collect()
 }
 
-/// Built-in keyboards are PS/2 (`ACPI\`) or I2C HID (`HID\VEN_`); USB and Bluetooth use `VID_`.
-fn is_builtin(id: &str) -> bool {
-    let id = id.to_ascii_uppercase();
-    id.starts_with("ACPI\\") || id.starts_with("HID\\VEN_")
+#[derive(Debug, PartialEq)]
+pub enum Kind {
+    /// Part of the PC: keydock blocks it.
+    BuiltIn,
+    /// Can go on the allowlist, keyed by VID:PID.
+    External(String),
+    Other,
 }
 
-/// Index of the only built-in keyboard; `None` when there is none or more than one.
-pub fn find_builtin(ids: &[String]) -> Option<usize> {
-    let mut matches = ids.iter().enumerate().filter(|(_, id)| is_builtin(id));
-    match (matches.next(), matches.next()) {
-        (Some((index, _)), None) => Some(index),
-        _ => None,
+/// `internal` holds the upper-case first hardware IDs of keyboards that are part of the PC.
+pub fn classify(id: &str, internal: &HashSet<String>) -> Kind {
+    if internal.contains(&id.to_ascii_uppercase()) {
+        return Kind::BuiltIn;
     }
+    vid_pid(id).map_or(Kind::Other, Kind::External)
 }
 
 /// `VID:PID` in upper case from USB (`VID_046D&PID_C52B`) and Bluetooth (`VID&0002046d_PID&b342`) IDs.
@@ -207,20 +389,27 @@ mod tests {
     }
 
     #[test]
-    fn ps2_and_i2c_keyboards_are_built_in_and_usb_is_not() {
-        assert!(is_builtin("ACPI\\VEN_PNP&DEV_0303"));
-        assert!(is_builtin("HID\\VEN_ELAN&DEV_0732&Col01"));
-        assert!(!is_builtin("HID\\VID_048D&PID_C101&Col02"));
-        assert!(!is_builtin("HID\\VID_046D&PID_C52B&MI_00"));
+    fn keyboards_that_are_part_of_the_pc_are_built_in_whatever_their_id() {
+        // The real laptop keyboard of the development machine is a USB HID device.
+        let internal = HashSet::from([r"HID\VID_048D&PID_C197&REV_1800&COL04".to_string()]);
+        assert_eq!(
+            classify(r"HID\VID_048D&PID_C197&REV_1800&Col04", &internal),
+            Kind::BuiltIn
+        );
+        assert_eq!(
+            classify(r"HID\VID_3434&PID_0351&REV_0101&MI_00", &internal),
+            Kind::External("3434:0351".into())
+        );
+        // An ACPI ID alone no longer makes a keyboard built-in.
+        assert_eq!(classify(r"ACPI\VEN_IDEA&DEV_0100", &internal), Kind::Other);
     }
 
     #[test]
-    fn find_builtin_needs_exactly_one_match() {
-        let usb = "HID\\VID_046D&PID_C52B&MI_00";
-        let ps2 = "ACPI\\VEN_PNP&DEV_0303";
-        assert_eq!(find_builtin(&ids(&[usb, ps2])), Some(1));
-        assert_eq!(find_builtin(&ids(&[usb])), None);
-        assert_eq!(find_builtin(&ids(&[ps2, usb, ps2])), None);
+    fn only_listed_devices_pass_the_filter_predicate() {
+        FILTER_DEVICES.store(device_bit(2) | device_bit(5), Ordering::Relaxed);
+        let passed: Vec<i32> = (0..=20).filter(|&d| in_filter_devices(d) == 1).collect();
+        assert_eq!(passed, [2, 5]);
+        FILTER_DEVICES.store(0, Ordering::Relaxed);
     }
 
     #[test]

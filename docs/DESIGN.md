@@ -34,13 +34,13 @@ If the driver is missing at startup, keydock stays inactive and shows an error t
 
 - Only keyboards on the allowlist trigger the block. Receiver dongles, YubiKeys and headsets often report as keyboards, so "any external keyboard" would block by mistake.
 - keydock identifies a keyboard by VID:PID, read from the Interception hardware ID (`HID\VID_xxxx&PID_xxxx...`). This matches the same model on any port and after Bluetooth re-pairing. Two units of the same model both match.
-- The user edits the allowlist in a tray submenu that lists connected keyboards with checkboxes. A keyboard with several interfaces (same VID:PID) gets one checkbox. The built-in keyboard gets none. Neither do devices that Windows places in the PC's own device container (`DEVPKEY_Device_InLocalMachineContainer`, read through SetupAPI and matched by first hardware ID): they are always connected, so checking one would keep the built-in keyboard blocked.
+- The user edits the allowlist in a tray submenu that lists connected keyboards with checkboxes. A keyboard with several interfaces (same VID:PID) gets one checkbox. Built-in keyboards (below) get none: they are always connected, so checking one would keep the built-in keyboard blocked.
 
 ### Target: the built-in keyboard only
 
 - keydock blocks only the built-in keyboard, never "every keyboard not on the allowlist".
-- keydock detects the built-in keyboard from its hardware ID (`ACPI\...` for PS/2/i8042, or an I2C HID ID). The user can override the choice in the tray menu.
-- keydock treats a keyboard as built-in only when exactly one keyboard matches the rule. With no match or several matches it finds no built-in keyboard.
+- keydock treats every keyboard that Windows places in the PC's own device container as built-in (`DEVPKEY_Device_InLocalMachineContainer`, read through SetupAPI and matched to the Interception device by first hardware ID), and blocks all of them. A hardware-ID rule failed: on the development laptop the keys come from a USB HID device (`HID\VID_048D&PID_C197...Col04`, an ITE controller), while the `ACPI\` keyboard sends nothing. Blocking a silent internal keyboard as well costs nothing.
+- If the container check fails, keydock finds no built-in keyboard; it never falls back to the hardware-ID rule. The user can override the choice in the tray menu (not built yet).
 - If keydock cannot find a built-in keyboard, it stays inactive and shows an error toast. Until toasts exist, the tray menu shows the error as a disabled item.
 
 ### Connect and disconnect
@@ -52,16 +52,18 @@ If the driver is missing at startup, keydock stays inactive and shows an error t
 
 A user must never be left with no working keyboard.
 
-1. Reversible block: Interception passes all input through when keydock's process dies, so a crash restores the built-in keyboard.
-2. keydock restores the built-in keyboard at every startup before it evaluates state.
-3. Tray menu items that work with the touchpad alone:
+1. Reversible block: when keydock's process dies, the driver drops its filters. Verified on the development laptop: a keydock killed while blocking ended in about 0.2 s, and the built-in keyboard worked at once.
+2. keydock restores the built-in keyboard at every startup before it evaluates state. It clears only the built-in keyboards' filters, so it does not break another Interception tool.
+3. keydock sets the filter only on the built-in keyboards. A hung keydock (alive but not reading keys) can freeze only them; other keyboards never pass through keydock.
+4. While blocking, keydock passes key-up events through, so a key held down when the block starts is not left down in Windows.
+5. Tray menu items that work with the touchpad alone:
    - **Pause keydock**: the built-in keyboard stays enabled until the user chooses **Resume**, also through reconnects. Use when the external keyboard is unreliable.
-   - **Re-enable until next connect**: the built-in keyboard is enabled now; keydock blocks it again the next time an allowlisted keyboard connects.
+   - **Re-enable until next connect**: the built-in keyboard is enabled now; keydock blocks it again the next time an allowlisted keyboard connects. The item is always enabled: muda disables items without graying them, so a disabled item would look clickable.
 
 ## UI
 
 - Crates: `tray-icon` for the tray and menu, `windows` for Win32 calls.
-- Two tray icons: active (built-in keyboard blocked) and inactive. The paused state shows in the icon or tooltip.
+- Two tray icons: active (built-in keyboard blocked) and inactive. The paused state shows in the icon or tooltip. For now only the tooltip shows the state; the second icon is not built yet.
 - Toast notifications only for errors (missing driver, no built-in keyboard found). No toast for normal block and restore.
 
 ## Config
@@ -101,7 +103,7 @@ A user must never be left with no working keyboard.
 These are facts to verify during the build, not open decisions:
 
 - Does the Interception client need admin rights? Autostart through the Run key assumes it does not. If it does, autostart needs a Task Scheduler task instead.
-  - Answered: no. A non-elevated keydock creates the context and reads every hardware ID (`src/interception.rs`). Setting a filter to block keys is not tested yet.
+  - Answered: no. A non-elevated keydock reads every hardware ID and blocks keys (`src/interception.rs`).
 - Is the reported 10-device-slot exhaustion after many hot-plug cycles still present? If yes, document it in the README.
 - What is the built-in keyboard's hardware ID on the development laptop? This confirms the auto-detection rule.
-  - Answered: the built-in keyboard is a PS/2 device with an `ACPI\` hardware ID, so the rule matches it. The same laptop also lists a receiver dongle, a vendor's virtual keyboard, and an internal USB controller (`HID\VID_048D`, likely the backlight) as keyboards. The rule correctly skips the internal controller, and the allowlist keeps all three from triggering a block.
+  - Answered, and the first answer was wrong. A pass-through test that logged the source device of each key showed that the laptop keys come from the ITE USB device `HID\VID_048D&PID_C197&REV_1800&Col04`, not from the `ACPI\VEN_IDEA&DEV_0100` device. That disproved the hardware-ID rule; see Target above.

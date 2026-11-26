@@ -17,6 +17,9 @@ pub struct Config {
     /// VID:PID of the keyboards that trigger the block, for example `3434:0351`.
     #[serde(default)]
     pub allowlist: BTreeSet<String>,
+    /// "Pause keydock": the built-in keyboard stays on until the user resumes.
+    #[serde(default)]
+    pub paused: bool,
 }
 
 pub fn path() -> windows::core::Result<PathBuf> {
@@ -66,6 +69,7 @@ mod tests {
         let path = scratch("roundtrip").join("config.toml");
         let config = Config {
             allowlist: BTreeSet::from(["3434:0351".to_string()]),
+            paused: true,
         };
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);
