@@ -126,6 +126,8 @@ fn run() -> Result<(), Box<dyn Error>> {
         blocker,
     };
     app.policy.set_triggered(app.triggered());
+    // The driver's list may still lack a keyboard plugged in just before startup.
+    app.rescans.start();
     app.refresh()?;
 
     let (results, update_results) = mpsc::channel();

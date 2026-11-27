@@ -48,7 +48,7 @@ If the driver is missing at startup, keydock stays inactive and shows an error t
 - keydock listens for keyboard arrival and removal (`CM_Register_Notification` with `GUID_DEVINTERFACE_KEYBOARD`).
 - Windows' device list (SetupAPI) decides which keyboards are present. The driver's list only supplies the device numbers to block: it lags arrivals and removals, and it stops listing new keyboards once its slots run out.
 - The driver drops all input from a keyboard without a slot. So an allowlisted keyboard triggers the block only if every one of its interfaces has a slot; otherwise the menu says so and the built-in keyboard stays on. Without this rule, a keyboard without a slot locked the user out (seen on the development laptop).
-- After each report keydock scans again every 250 ms for 5 s, because the driver's list lags the report (under 2 s on the development laptop).
+- At startup and after each report keydock scans again every 250 ms for 5 s, because the driver's list lags the report (under 2 s on the development laptop).
 - An arrival report for an allowlisted keyboard ends **Re-enable until next connect**, even if no scan saw the keyboard leave.
 - If a rescan fails, keydock stops blocking until the next keyboard change.
 - The built-in keyboard stays blocked while at least one allowlisted keyboard is connected. keydock restores it when the last one disconnects.
