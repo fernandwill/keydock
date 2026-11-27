@@ -82,6 +82,7 @@ A user must never be left with no working keyboard.
 
 - An `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value. Per-user, no admin rights.
 - A **Start at login** checkbox in the tray menu adds or removes the value. The value is the quoted path of the running `keydock.exe`; the checkbox shows checked only when the value matches it, so a moved folder shows unchecked instead of a value that starts nothing.
+- Task Manager and Settings > Apps > Startup switch an entry off with a value under `Explorer\StartupApproved\Run` (odd first byte means off) and keep the Run value. keydock shows such an entry as unchecked, and checking it deletes that value, so the entry is on again.
 
 ## Updates
 
