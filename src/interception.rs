@@ -342,12 +342,16 @@ fn block_loop(driver: &Driver, built_in: Devices, requests: &Receiver<Request>) 
         let Some(stroke) = driver.receive(device) else {
             continue;
         };
-        // Key-ups pass, so a key held down when blocking starts is not left down in Windows.
-        // Keys queued before an unblock also pass.
-        if blocked & device_bit(device) == 0 || stroke.state & KEY_UP != 0 {
+        if passes(blocked, device, stroke.state) {
             driver.send(device, &stroke);
         }
     }
+}
+
+/// Key-ups pass, so a key held down when blocking starts is not left down in Windows.
+/// Keys queued before an unblock also pass.
+fn passes(blocked: Devices, device: i32, state: u16) -> bool {
+    blocked & device_bit(device) == 0 || state & KEY_UP != 0
 }
 
 /// Turns a REG_MULTI_SZ buffer of `bytes` length into its strings.
@@ -424,6 +428,17 @@ mod tests {
         let passed: Vec<i32> = (0..=20).filter(|&d| in_filter_devices(d) == 1).collect();
         assert_eq!(passed, [2, 5]);
         FILTER_DEVICES.store(0, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn a_blocked_device_passes_only_key_ups_including_extended_ones() {
+        const KEY_E0: u16 = 0x02;
+        let blocked = device_bit(2);
+        assert!(!passes(blocked, 2, 0));
+        assert!(!passes(blocked, 2, KEY_E0));
+        assert!(passes(blocked, 2, KEY_UP));
+        assert!(passes(blocked, 2, KEY_E0 | KEY_UP), "arrow key-up");
+        assert!(passes(blocked, 3, 0), "device not blocked");
     }
 
     #[test]
