@@ -3,6 +3,7 @@
 #[cfg(not(windows))]
 compile_error!("keydock supports Windows only");
 
+mod autostart;
 mod config;
 mod devices;
 mod interception;
@@ -116,6 +117,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         update_note: None,
         pause: items.pause,
         reenable: items.reenable,
+        login: items.login,
         quit_id: items.quit.id().clone(),
         keyboards_menu: items.keyboards,
         changes,
@@ -145,6 +147,7 @@ struct MenuItems {
     keyboards: Option<Submenu>,
     pause: CheckMenuItem,
     reenable: MenuItem,
+    login: CheckMenuItem,
     quit: MenuItem,
 }
 
@@ -169,17 +172,27 @@ fn build_menu(
             (Found::default(), None)
         }
     };
+    let login = match autostart::enabled() {
+        Ok(login) => login,
+        Err(error) => {
+            menu.append(&disabled(&format!("Start at login state unknown: {error}")))?;
+            false
+        }
+    };
     let items = MenuItems {
         keyboards: submenu,
         pause: CheckMenuItem::new("Pause keydock", true, config.paused, None),
         // Always enabled: muda disables items without graying them, so a disabled item looks clickable.
         reenable: MenuItem::new("Re-enable until next connect", true, None),
+        login: CheckMenuItem::new("Start at login", true, login, None),
         quit: MenuItem::new("Quit", true, None),
     };
     menu.append_items(&[
         &PredefinedMenuItem::separator(),
         &items.pause,
         &items.reenable,
+        &PredefinedMenuItem::separator(),
+        &items.login,
         &PredefinedMenuItem::separator(),
         &items.quit,
     ])?;
@@ -470,6 +483,7 @@ struct App {
     update_note: Option<String>,
     pause: CheckMenuItem,
     reenable: MenuItem,
+    login: CheckMenuItem,
     quit_id: MenuId,
     keyboards_menu: Option<Submenu>,
     changes: mpsc::Receiver<Change>,
@@ -534,6 +548,13 @@ impl App {
             self.settings.save();
         } else if id == self.reenable.id() {
             self.policy.suspended = true;
+        } else if id == self.login.id() {
+            // muda has already toggled the check mark; undo it if the registry refuses.
+            let on = self.login.is_checked();
+            if let Err(error) = autostart::set(on) {
+                self.login.set_checked(!on);
+                show_error(&format!("keydock could not change Start at login: {error}"));
+            }
         } else if let Some(vid_pid) = self.found.checkboxes.get(id) {
             let allowlist = &mut self.settings.config.allowlist;
             if !allowlist.remove(vid_pid) {

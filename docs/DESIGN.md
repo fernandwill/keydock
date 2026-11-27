@@ -80,7 +80,7 @@ A user must never be left with no working keyboard.
 ## Autostart
 
 - An `HKCU\Software\Microsoft\Windows\CurrentVersion\Run` value. Per-user, no admin rights.
-- A **Start at login** checkbox in the tray menu adds or removes the value.
+- A **Start at login** checkbox in the tray menu adds or removes the value. The value is the quoted path of the running `keydock.exe`; the checkbox shows checked only when the value matches it, so a moved folder shows unchecked instead of a value that starts nothing.
 
 ## Updates
 
