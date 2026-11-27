@@ -19,7 +19,11 @@ const VALUE: PCWSTR = w!("keydock");
 /// Whether Windows starts this keydock.exe at login. A value for another path, left by a moved
 /// folder, counts as off, and so does an entry the user switched off in Windows.
 pub fn enabled() -> io::Result<bool> {
-    Ok(read(RUN_KEY)? == Some(command()?) && !switched_off(APPROVED_KEY)?)
+    let lower = |units: &[u16]| String::from_utf16_lossy(units).to_lowercase();
+    let command = lower(&command()?);
+    // Windows paths ignore case, and the exe path keeps the case keydock was started with.
+    let ours = read(RUN_KEY)?.is_some_and(|value| lower(&value) == command);
+    Ok(ours && !switched_off(APPROVED_KEY)?)
 }
 
 pub fn set(on: bool) -> io::Result<()> {
