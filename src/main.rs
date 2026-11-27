@@ -598,9 +598,12 @@ impl App {
                 && let Err(error) = self.rescan()
             {
                 // Without a reliable list keydock cannot know what is connected, so it stops
-                // blocking; the next keyboard change tries again.
-                self.found = Found::default();
-                self.policy.set_triggered(false);
+                // blocking; the next keyboard change tries again. The policy and checkboxes stay,
+                // so the next good scan is not taken for a new connection.
+                self.found.built_in = 0;
+                // Forces the next scan to rebuild the menu.
+                self.found.keyboards.clear();
+                self.found.present.clear();
                 if let Err(error) = self.refresh() {
                     show_error(&format!("keydock could not update its state: {error}"));
                 }
