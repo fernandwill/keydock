@@ -27,6 +27,7 @@ jobs:
       - name: Build
         run: |
           rustup toolchain install stable --profile minimal
+          cargo +stable test --locked
           cargo +stable build --release --locked
 
       - name: Assemble the release zip

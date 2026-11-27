@@ -41,4 +41,4 @@ keydock is MIT-licensed; see [LICENSE](LICENSE). The bundled Interception files 
 
 ## Release
 
-Set `version` in `Cargo.toml`, commit, then push a matching tag (for example `v0.2.0`). The `release` workflow checks that the tag matches the version, builds keydock, runs `scripts/package-release.sh` to download Interception at a pinned SHA-256, and publishes `keydock-<tag>-x64.zip` as a GitHub release. To build the zip locally, run `cargo build --release --locked` and then `bash scripts/package-release.sh v0.1.0`.
+Set `version` in `Cargo.toml`, commit, then push a matching tag (for example `v0.2.0`). The `release` workflow checks that the tag matches the version, runs the unit tests, builds keydock, runs `scripts/package-release.sh` to download Interception at a pinned SHA-256, and publishes `keydock-<tag>-x64.zip` as a GitHub release. To build the zip locally, run `cargo build --release --locked` and then `bash scripts/package-release.sh v0.1.0`.
