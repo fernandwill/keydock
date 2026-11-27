@@ -718,15 +718,14 @@ impl App {
         let Some(keyboards) = blocker.keyboards() else {
             return Err("the input thread did not answer".into());
         };
-        let present = devices::present_keyboards();
-        let unchanged = keyboards == self.found.keyboards
-            && present
-                .as_ref()
-                .is_ok_and(|present| *present == self.found.present);
+        // A failed list is a failed scan, not "nothing connected": that would look like an unplug,
+        // and the next good scan would end Re-enable.
+        let present = devices::present_keyboards()?;
+        let unchanged = keyboards == self.found.keyboards && present == self.found.present;
         // Most scans in a rescan window find nothing new; rebuilding the menu then is wasted.
         if !unchanged {
             while submenu.remove_at(0).is_some() {}
-            let found = fill_keyboards(submenu, &keyboards, &present, &self.settings.config)?;
+            let found = fill_keyboards(submenu, &keyboards, &Ok(present), &self.settings.config)?;
             self.found = found;
             self.policy.set_triggered(self.triggered());
         }
