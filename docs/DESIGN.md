@@ -41,7 +41,7 @@ If the driver is missing at startup, keydock stays inactive and shows an error t
 - keydock blocks only the built-in keyboard, never "every keyboard not on the allowlist".
 - keydock treats every keyboard that Windows places in the PC's own device container as built-in (`DEVPKEY_Device_InLocalMachineContainer`, read through SetupAPI and matched to the Interception device by first hardware ID), and blocks all of them. A hardware-ID rule failed: on the development laptop the keys come from a USB HID device (`HID\VID_048D&PID_C197...Col04`, an ITE controller), while the `ACPI\` keyboard sends nothing. Blocking a silent internal keyboard as well costs nothing.
 - If the container check fails, keydock finds no built-in keyboard; it never falls back to the hardware-ID rule. The user can override the choice in the tray menu (not built yet).
-- If keydock cannot find a built-in keyboard, it stays inactive and shows an error toast. Until toasts exist, the tray menu shows the error as a disabled item.
+- If keydock cannot find a built-in keyboard at startup, it stays inactive and shows an error toast. The tray menu also shows the error as a disabled item.
 
 ### Connect and disconnect
 
@@ -69,7 +69,8 @@ A user must never be left with no working keyboard.
 
 - Crates: `tray-icon` for the tray and menu, `windows` for Win32 calls.
 - Two tray icons: blocked (the keyboard with a red slash) and not blocked (the plain keyboard). Paused, suspended and inactive all use the plain icon; the tooltip names the exact state.
-- Toast notifications only for errors (missing driver, no built-in keyboard found). No toast for normal block and restore.
+- Toast notifications only for errors found at startup (missing DLL or driver, no built-in keyboard found). No toast for normal block and restore.
+- A toast is a tray balloon (`Shell_NotifyIconW` with `NIF_INFO`), which Windows 10 and 11 show as a toast without an app ID or Start menu shortcut; a portable zip has neither. The balloon names tray-icon's private icon ID, so the `tray-icon` pin must stay exact. If the shell refuses the balloon, keydock shows the error in a dialog instead.
 
 ## Config
 

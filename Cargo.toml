@@ -8,7 +8,8 @@ repository = "https://github.com/fernandwill/keydock"
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 toml = "1.2.3"
-# Exact pin: tests/tray_quit.py relies on this release's private window class and callback message.
+# Exact pin: tests/tray_quit.py and the error toast rely on this release's private window class,
+# callback message and icon ID.
 tray-icon = { version = "=0.26.1", default-features = false }
 windows = { version = "0.62", features = [
     "Win32_Devices_DeviceAndDriverInstallation",

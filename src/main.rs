@@ -30,11 +30,13 @@ use update::Outcome;
 use windows::{
     Win32::{
         Foundation::{
-            ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, LPARAM, WPARAM,
+            ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, GetLastError, HANDLE, HWND, LPARAM, WPARAM,
         },
         System::Threading::{CreateMutexW, GetCurrentThreadId},
         UI::{
-            Shell::ShellExecuteW,
+            Shell::{
+                NIF_INFO, NIIF_ERROR, NIM_MODIFY, NOTIFYICONDATAW, Shell_NotifyIconW, ShellExecuteW,
+            },
             WindowsAndMessaging::{
                 DispatchMessageW, GetMessageW, KillTimer, MB_ICONERROR, MSG, MessageBoxW,
                 PostThreadMessageW, SW_SHOWNORMAL, SetTimer, TranslateMessage, WM_APP, WM_TIMER,
@@ -50,6 +52,8 @@ const RESCAN_INTERVAL_MS: u32 = 250;
 const RESCAN_WINDOW: Duration = Duration::from_secs(5);
 // ShellExecuteW reports success with a value above this.
 const SHELL_EXECUTE_MAX_ERROR: isize = 32;
+// tray-icon 0.26.1 gives its only icon this private shell ID (see tests/tray_quit.py).
+const TRAY_ICON_ID: u32 = 2;
 
 fn main() -> ExitCode {
     if let Err(error) = run() {
@@ -61,6 +65,49 @@ fn main() -> ExitCode {
 
 fn show_error(message: &str) {
     unsafe { MessageBoxW(None, &HSTRING::from(message), w!("keydock"), MB_ICONERROR) };
+}
+
+/// Shows `message` as an error toast from the tray icon, or as a dialog if the shell refuses.
+fn notify_error(tray: &TrayIcon, message: &str) {
+    let mut data = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: HWND(tray.window_handle()),
+        uID: TRAY_ICON_ID,
+        uFlags: NIF_INFO,
+        dwInfoFlags: NIIF_ERROR,
+        ..Default::default()
+    };
+    copy_wide(&mut data.szInfoTitle, "keydock");
+    copy_wide(&mut data.szInfo, message);
+    // Fails if tray-icon ever changes its icon ID; the dialog keeps the error visible then.
+    if !unsafe { Shell_NotifyIconW(NIM_MODIFY, &data) }.as_bool() {
+        show_error(message);
+    }
+}
+
+/// Copies `text` into a fixed UTF-16 field, cut short so the closing NUL fits.
+fn copy_wide(field: &mut [u16], text: &str) {
+    let room = field.len() - 1;
+    for (unit, value) in field[..room].iter_mut().zip(text.encode_utf16()) {
+        *unit = value;
+    }
+}
+
+/// What keydock cannot work without, for the startup toast.
+fn startup_error(keyboards: &Result<Vec<Keyboard>, ScanError>, found: &Found) -> Option<String> {
+    match keyboards {
+        Err(error @ ScanError::DriverUnavailable) => Some(format!(
+            "{error}. To install it, run install-interception.exe /install as administrator in \
+             keydock's folder, then restart Windows."
+        )),
+        Err(error) => Some(error.to_string()),
+        Ok(_) if found.built_in == 0 => Some(
+            "No blockable built-in keyboard found, so keydock stays inactive. The Keyboards menu \
+             lists what it found."
+                .into(),
+        ),
+        Ok(_) => None,
+    }
 }
 
 /// Takes the single-instance lock; `None` means another keydock already holds it.
@@ -102,6 +149,9 @@ fn run() -> Result<(), Box<dyn Error>> {
     };
     let (menu, found, items) = build_menu(&notices, &keyboards, &settings.config)?;
     let (tray, menu_events) = build_tray(&menu)?;
+    if let Some(message) = startup_error(&keyboards, &found) {
+        notify_error(&tray, &message);
+    }
     // Spawned before the first refresh: the thread clears any filter left on the built-in
     // keyboard before it reads the first device set.
     let blocker =
@@ -916,6 +966,30 @@ mod tests {
         };
         policy.set_triggered(true);
         assert!(!policy.blocking());
+    }
+
+    #[test]
+    fn copy_wide_keeps_the_closing_nul_when_it_cuts_text() {
+        // NOTIFYICONDATAW starts zeroed, so the last unit stays the NUL.
+        let mut field = [0u16; 4];
+        copy_wide(&mut field, "abcdef");
+        assert_eq!(field, [b'a'.into(), b'b'.into(), b'c'.into(), 0]);
+    }
+
+    #[test]
+    fn startup_toasts_only_for_a_missing_driver_or_built_in_keyboard() {
+        let blockable = Found {
+            built_in: interception::device_bit(2),
+            ..Found::default()
+        };
+        let driver = startup_error(&Err(ScanError::DriverUnavailable), &blockable).unwrap();
+        assert!(driver.contains("install-interception.exe"), "{driver}");
+        let none_found = startup_error(&Ok(Vec::new()), &Found::default()).unwrap();
+        assert!(
+            none_found.contains("No blockable built-in keyboard"),
+            "{none_found}"
+        );
+        assert_eq!(startup_error(&Ok(Vec::new()), &blockable), None);
     }
 
     #[test]
