@@ -40,7 +40,7 @@ If the driver is missing at startup, keydock stays inactive and shows an error t
 
 - keydock blocks only the built-in keyboard, never "every keyboard not on the allowlist".
 - keydock treats every keyboard that Windows places in the PC's own device container as built-in (`DEVPKEY_Device_InLocalMachineContainer`, read through SetupAPI and matched to the Interception device by first hardware ID), and blocks all of them. A hardware-ID rule failed: on the development laptop the keys come from a USB HID device (`HID\VID_048D&PID_C197...Col04`, an ITE controller), while the `ACPI\` keyboard sends nothing. Blocking a silent internal keyboard as well costs nothing.
-- If the container check fails, keydock finds no built-in keyboard; it never falls back to the hardware-ID rule. The user can override the choice in the tray menu (not built yet).
+- If the container check fails, keydock finds no built-in keyboard; it never falls back to the hardware-ID rule. v1 has no manual override: detection worked on the development laptop, and every override form can block the only working keyboard. Add one if a user reports a wrong detection.
 - If keydock cannot find a built-in keyboard at startup, it stays inactive and shows an error toast. The tray menu also shows the error as a disabled item.
 
 ### Connect and disconnect
@@ -76,7 +76,7 @@ A user must never be left with no working keyboard.
 
 - File: `%APPDATA%\keydock\config.toml` (from `SHGetKnownFolderPath(FOLDERID_RoamingAppData)`, so no `dirs` crate).
 - keydock writes a temporary file, flushes it to disk, and renames it, so a crash or power cut never leaves a half-written config. If the file exists but cannot be read, keydock starts with an empty allowlist and does not save, so it never overwrites the user's file.
-- Holds: the allowlist (VID:PID list), the built-in keyboard override, the paused flag.
+- Holds: the allowlist (VID:PID list) and the paused flag.
 
 ## Autostart
 
