@@ -171,6 +171,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         login: items.login,
         quit_id: items.quit.id().clone(),
         icon_blocking: Cell::new(false),
+        tray_stale: Cell::new(false),
         keyboards_menu: items.keyboards,
         changes,
         rescans: Rescans::default(),
@@ -182,7 +183,7 @@ fn run() -> Result<(), Box<dyn Error>> {
     app.policy.set_triggered(app.triggered());
     // The driver's list may still lack a keyboard plugged in just before startup.
     app.rescans.start();
-    app.refresh()?;
+    app.refresh();
 
     let (results, update_results) = mpsc::channel();
     update::spawn_checker(results, move || wake(main_thread));
@@ -539,6 +540,8 @@ struct App {
     quit_id: MenuId,
     /// Whether the tray shows the blocked icon.
     icon_blocking: Cell<bool>,
+    /// The last tray update failed, so the tray may show an old state.
+    tray_stale: Cell<bool>,
     keyboards_menu: Option<Submenu>,
     changes: mpsc::Receiver<Change>,
     rescans: Rescans,
@@ -573,13 +576,20 @@ impl App {
     }
 
     /// Applies the current state: the block first, then the icon and tooltip.
-    fn refresh(&self) -> Result<(), Box<dyn Error>> {
+    fn refresh(&self) {
         let status = self.status();
         let blocking = status == Status::Blocking;
         if let Some(blocker) = &self.blocker {
             blocker.block(if blocking { self.found.built_in } else { 0 });
         }
-        // Rescans call this every 250 ms; only a change needs a new icon.
+        // The shell refuses tray updates while Explorer restarts or hangs. The tray only shows
+        // the state, so that must not stop keydock; the message loop retries on its next message.
+        self.tray_stale
+            .set(self.show_tray(status, blocking).is_err());
+    }
+
+    fn show_tray(&self, status: Status, blocking: bool) -> Result<(), Box<dyn Error>> {
+        // Rescans refresh every 250 ms; only a change needs a new icon.
         if blocking != self.icon_blocking.get() {
             self.tray.set_icon(Some(keyboard_icon(blocking)?))?;
             self.icon_blocking.set(blocking);
@@ -590,9 +600,9 @@ impl App {
     }
 
     /// Returns `false` when the user chose Quit.
-    fn on_click(&mut self, id: &MenuId) -> Result<bool, Box<dyn Error>> {
+    fn on_click(&mut self, id: &MenuId) -> bool {
         if *id == self.quit_id {
-            return Ok(false);
+            return false;
         }
         if id == self.update.id() {
             open_releases_page();
@@ -618,8 +628,8 @@ impl App {
             self.settings.save();
             self.policy.set_triggered(self.triggered());
         }
-        self.refresh()?;
-        Ok(true)
+        self.refresh();
+        true
     }
 
     fn message_loop(
@@ -645,13 +655,8 @@ impl App {
                 }
             }
             for id in clicks.try_iter() {
-                match self.on_click(&id) {
-                    Ok(true) => {}
-                    Ok(false) => return Ok(()),
-                    // refresh applies the block before it can fail, so keydock keeps running.
-                    Err(error) => {
-                        show_error(&format!("keydock could not apply the change: {error}"))
-                    }
+                if !self.on_click(&id) {
+                    return Ok(());
                 }
             }
             let mut changed = false;
@@ -680,9 +685,7 @@ impl App {
                 // Forces the next scan to rebuild the menu.
                 self.found.keyboards.clear();
                 self.found.present.clear();
-                if let Err(error) = self.refresh() {
-                    show_error(&format!("keydock could not update its state: {error}"));
-                }
+                self.refresh();
                 show_error(&format!(
                     "keydock could not update the keyboard list: {error}"
                 ));
@@ -695,9 +698,10 @@ impl App {
                     "keydock's input thread stopped, so the built-in keyboard is no longer \
                      blocked. Restart keydock to block it again.",
                 );
-                if let Err(error) = self.refresh() {
-                    show_error(&format!("keydock could not update its state: {error}"));
-                }
+                self.refresh();
+            }
+            if self.tray_stale.get() {
+                self.refresh();
             }
         }
     }
@@ -727,7 +731,8 @@ impl App {
             self.policy.set_triggered(self.triggered());
         }
         // Also applies an arrival that ended a suspension.
-        self.refresh()
+        self.refresh();
+        Ok(())
     }
 
     /// Puts the result of an update check in the menu and tooltip.
@@ -750,7 +755,8 @@ impl App {
                 self.show_update_item(format!("Update check failed: {reason}"))?;
             }
         }
-        self.refresh()
+        self.refresh();
+        Ok(())
     }
 
     /// The item opens the release page when clicked.
