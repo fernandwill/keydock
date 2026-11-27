@@ -13,6 +13,7 @@ use config::Config;
 use devices::{Change, KeyboardWatch, Present};
 use interception::{Blocker, Devices, Driver, Keyboard, ScanError};
 use std::{
+    cell::Cell,
     collections::HashMap,
     error::Error,
     io,
@@ -119,6 +120,7 @@ fn run() -> Result<(), Box<dyn Error>> {
         reenable: items.reenable,
         login: items.login,
         quit_id: items.quit.id().clone(),
+        icon_blocking: Cell::new(false),
         keyboards_menu: items.keyboards,
         changes,
         rescans: Rescans::default(),
@@ -211,7 +213,7 @@ fn build_tray(menu: &Menu) -> Result<(TrayIcon, mpsc::Receiver<MenuId>), Box<dyn
     tray_icon::TrayIconEvent::set_event_handler(Some(|_| {}));
     let tray = TrayIconBuilder::new()
         .with_tooltip(tooltip(Status::Inactive, None))
-        .with_icon(keyboard_icon()?)
+        .with_icon(keyboard_icon(false)?)
         .with_menu(Box::new(menu.clone()))
         .build()?;
     Ok((tray, menu_events))
@@ -485,6 +487,8 @@ struct App {
     reenable: MenuItem,
     login: CheckMenuItem,
     quit_id: MenuId,
+    /// Whether the tray shows the blocked icon.
+    icon_blocking: Cell<bool>,
     keyboards_menu: Option<Submenu>,
     changes: mpsc::Receiver<Change>,
     rescans: Rescans,
@@ -518,16 +522,17 @@ impl App {
         }
     }
 
-    /// Applies the current state: the block first, then the tooltip.
+    /// Applies the current state: the block first, then the icon and tooltip.
     fn refresh(&self) -> Result<(), Box<dyn Error>> {
         let status = self.status();
+        let blocking = status == Status::Blocking;
         if let Some(blocker) = &self.blocker {
-            let devices = if status == Status::Blocking {
-                self.found.built_in
-            } else {
-                0
-            };
-            blocker.block(devices);
+            blocker.block(if blocking { self.found.built_in } else { 0 });
+        }
+        // Rescans call this every 250 ms; only a change needs a new icon.
+        if blocking != self.icon_blocking.get() {
+            self.tray.set_icon(Some(keyboard_icon(blocking)?))?;
+            self.icon_blocking.set(blocking);
         }
         self.tray
             .set_tooltip(Some(tooltip(status, self.update_note.as_deref())))?;
@@ -725,8 +730,27 @@ fn open_releases_page() {
     }
 }
 
-fn keyboard_icon() -> Result<Icon, tray_icon::BadIcon> {
+/// The red slash marks the built-in keyboard as blocked.
+fn keyboard_icon(blocking: bool) -> Result<Icon, tray_icon::BadIcon> {
     // Square, because the shell stretches tray icons to a square slot.
+    const BLOCKED: [&str; 16] = [
+        "                ",
+        "             rr ",
+        "            rr  ",
+        "           rr   ",
+        " #########rr### ",
+        " #.......rr...# ",
+        " #.#.#.#rr.##.# ",
+        " #.....rr.....# ",
+        " #.##.rr#.#.#.# ",
+        " #...rr.......# ",
+        " #..rr#####...# ",
+        " ##rr########## ",
+        "  rr            ",
+        " rr             ",
+        "rr              ",
+        "                ",
+    ];
     const KEYS: [&str; 16] = [
         "                ",
         "                ",
@@ -745,15 +769,17 @@ fn keyboard_icon() -> Result<Icon, tray_icon::BadIcon> {
         "                ",
         "                ",
     ];
-    let rgba = KEYS
+    let rows = if blocking { BLOCKED } else { KEYS };
+    let rgba = rows
         .iter()
         .flat_map(|row| row.bytes())
         .flat_map(|pixel| match pixel {
             b'#' => [240, 240, 240, 255],
             b'.' => [55, 55, 55, 255],
+            b'r' => [225, 45, 45, 255],
             _ => [0, 0, 0, 0],
         });
-    Icon::from_rgba(rgba.collect(), KEYS[0].len() as u32, KEYS.len() as u32)
+    Icon::from_rgba(rgba.collect(), rows[0].len() as u32, rows.len() as u32)
 }
 
 #[cfg(test)]
@@ -890,6 +916,13 @@ mod tests {
         };
         policy.set_triggered(true);
         assert!(!policy.blocking());
+    }
+
+    #[test]
+    fn both_tray_icons_build() {
+        // The blocked icon is first built while blocking, so a bad pixel map would fail only then.
+        assert!(keyboard_icon(false).is_ok());
+        assert!(keyboard_icon(true).is_ok());
     }
 
     #[test]

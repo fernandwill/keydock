@@ -68,7 +68,7 @@ A user must never be left with no working keyboard.
 ## UI
 
 - Crates: `tray-icon` for the tray and menu, `windows` for Win32 calls.
-- Two tray icons: active (built-in keyboard blocked) and inactive. The paused state shows in the icon or tooltip. For now only the tooltip shows the state; the second icon is not built yet.
+- Two tray icons: blocked (the keyboard with a red slash) and not blocked (the plain keyboard). Paused, suspended and inactive all use the plain icon; the tooltip names the exact state.
 - Toast notifications only for errors (missing driver, no built-in keyboard found). No toast for normal block and restore.
 
 ## Config
