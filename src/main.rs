@@ -302,8 +302,9 @@ fn fill_keyboards(
                 if slot {
                     found.external.push(vid_pid);
                 } else {
+                    // Right after a plug-in this is often only the driver's lag.
                     let text = format!(
-                        "{vid_pid} gets no input until Windows restarts (Interception device limit)"
+                        "{vid_pid}: no Interception slot yet; if this stays, restart Windows"
                     );
                     submenu.append(&disabled(&text))?;
                 }
