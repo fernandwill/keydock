@@ -14,6 +14,8 @@ Look for the keyboard icon in the Windows notification area (check hidden icons 
 
 **Known limit:** the Interception driver hands out a limited number of device slots per Windows session, and every keyboard connection uses new ones (the Keychron used two per connection on the development laptop). When they run out, a newly connected keyboard is listed by Windows but types nothing, with or without keydock running. keydock then shows `<VID:PID>: no Interception slot yet; if this stays, restart Windows` and does not block the built-in keyboard. For a second or two after you plug a keyboard in, keydock can show this message even when slots are free, because the driver is slow to list the keyboard. Restart Windows to get the slots back.
 
+**Known limit:** keydock counts a keyboard as connected while Windows lists it. A wireless keyboard's USB receiver stays listed when the keyboard is off or its battery is empty, so if you allowlist the receiver, the built-in keyboard stays blocked. Use the touchpad to choose **Re-enable until next connect** or **Pause keydock**. Some Bluetooth LE keyboards may also stay listed while disconnected.
+
 ## Update notice
 
 About 60 seconds after it starts, and then every 24 hours, keydock asks GitHub for the latest release of this repository (`api.github.com/repos/<owner>/keydock/releases/latest`, User-Agent `keydock/<version>`). It sends nothing else. If the release is newer than the running version, the tray menu shows **Update available: vX.Y.Z**, which opens the release page, and the tooltip says so too. If the check fails, the menu shows an **Update check failed** item with the reason, which also opens the release page. keydock never downloads or installs anything itself.
