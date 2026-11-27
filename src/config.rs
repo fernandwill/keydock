@@ -2,7 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeSet,
     ffi::{OsString, c_void},
-    fs, io,
+    fs,
+    io::{self, Write},
     os::windows::ffi::OsStringExt,
     path::{Path, PathBuf},
 };
@@ -47,9 +48,12 @@ pub fn save(path: &Path, config: &Config) -> io::Result<()> {
         fs::create_dir_all(folder)?;
     }
     let text = toml::to_string(config).map_err(io::Error::other)?;
-    // Write then rename, so a crash mid-write never leaves a half-written config.
+    // Write, flush to disk, then rename, so a crash or power cut never leaves a half-written config.
     let temp = path.with_extension("toml.tmp");
-    fs::write(&temp, text)?;
+    let mut file = fs::File::create(&temp)?;
+    file.write_all(text.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
     fs::rename(&temp, path)
 }
 

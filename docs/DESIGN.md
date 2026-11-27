@@ -74,7 +74,7 @@ A user must never be left with no working keyboard.
 ## Config
 
 - File: `%APPDATA%\keydock\config.toml` (from `SHGetKnownFolderPath(FOLDERID_RoamingAppData)`, so no `dirs` crate).
-- keydock writes a temporary file and renames it, so a crash never leaves a half-written config. If the file exists but cannot be read, keydock starts with an empty allowlist and does not save, so it never overwrites the user's file.
+- keydock writes a temporary file, flushes it to disk, and renames it, so a crash or power cut never leaves a half-written config. If the file exists but cannot be read, keydock starts with an empty allowlist and does not save, so it never overwrites the user's file.
 - Holds: the allowlist (VID:PID list), the built-in keyboard override, the paused flag.
 
 ## Autostart
